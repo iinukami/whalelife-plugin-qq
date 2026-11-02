@@ -1,0 +1,8 @@
+{
+  "name": "NapCatQQ Framework",
+  "version": "4.18.41",
+  "platform": "win32-x64",
+  "source": "https://github.com/NapNeko/NapCatQQ/tree/v4.18.41",
+  "archive": "https://github.com/NapNeko/NapCatQQ/releases/download/v4.18.41/NapCat.Framework.zip",
+  "sha256": "3c526f5789ff6cc56d78381eb10536c8273fe394d227187b27dea94b59965822"
+}

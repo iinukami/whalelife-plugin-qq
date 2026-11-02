@@ -1,0 +1,38 @@
+{
+  "name": "whalelife-plugin-qq",
+  "version": "0.14.1",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "prepare:engine": "node scripts/prepare-engine.mjs",
+    "prepare:desktop": "node scripts/prepare-desktop.mjs",
+    "build": "node scripts/build.mjs",
+    "test": "node --test --test-concurrency=1 tests/*.test.ts",
+    "prepare:attach": "node scripts/prepare-attach.mjs"
+  },
+  "dependencies": {
+    "frida": "17.24.0",
+    "json5": "2.2.3",
+    "parse5": "8.0.0",
+    "qrcode": "1.5.4",
+    "sharp": "0.35.5",
+    "undici": "7.30.1",
+    "ws": "8.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "@types/qrcode": "1.5.6",
+    "@types/ws": "8.18.1",
+    "esbuild": "0.25.12",
+    "typescript": "5.9.3"
+  },
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/iinukami/whalelife-plugin-qq.git"
+  }
+}

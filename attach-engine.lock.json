@@ -1,0 +1,7 @@
+{
+  "version": "17.24.0",
+  "platform": "win32-x64",
+  "archive": "https://github.com/frida/frida/releases/download/17.24.0/frida-v17.24.0-napi-v8-win32-x64.tar.gz",
+  "sha256": "90712f462a637784cfe2713672e651f86360d45ae9f36ac99c0f9f7a913c75cb",
+  "bindingSha256": "ee70a01fbdca968c23602cf662ce611a3cc99ce96df922361fb02baadabe73c3"
+}

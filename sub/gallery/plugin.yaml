@@ -1,0 +1,6 @@
+id: gallery
+name: QQ 图库接入
+version: 0.9.1
+description: QQ 原图收藏与图库图文发送，保留动图、顺序及发送回执；停用不影响普通 QQ 聊天。
+apiVersion: "1.0.0"
+depends: [qq, gallery]
