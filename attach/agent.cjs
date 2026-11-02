@@ -1,3 +1,7 @@
+/*! Copyright (c) 2026 iinukami and contributors.
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * Additional terms under AGPLv3 Section 7: see LICENSE-ADDITIONAL.
+ */
 // Runs in QQ's existing main JS loop. Never initializes or closes a QQ session.
 const { pathToFileURL } = require('node:url');
 const path = require('node:path');

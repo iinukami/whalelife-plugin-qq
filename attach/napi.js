@@ -1,3 +1,7 @@
+/*! Copyright (c) 2026 iinukami and contributors.
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * Additional terms under AGPLv3 Section 7: see LICENSE-ADDITIONAL.
+ */
 // Invoke only from an existing callback with a valid env and handle scope.
 // QQ.exe exports forwarding stubs; QQNT.dll owns the running JS environment.
 const host = Process.findModuleByName('QQNT.dll') || Process.enumerateModules().find(m => m.findExportByName('napi_get_cb_info'));

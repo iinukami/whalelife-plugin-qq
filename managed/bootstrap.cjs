@@ -1,3 +1,7 @@
+/*! Copyright (c) 2026 iinukami and contributors.
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * Additional terms under AGPLv3 Section 7: see LICENSE-ADDITIONAL.
+ */
 // Runs ONLY in the owned protocol child, never in WhaleLife or its plugin worker.
 const fs = require('node:fs');
 const path = require('node:path');

@@ -30,7 +30,7 @@
     "esbuild": "0.25.12",
     "typescript": "5.9.3"
   },
-  "license": "UNLICENSED",
+  "license": "AGPL-3.0-only",
   "repository": {
     "type": "git",
     "url": "https://github.com/iinukami/whalelife-plugin-qq.git"

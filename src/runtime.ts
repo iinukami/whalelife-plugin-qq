@@ -1,3 +1,7 @@
+/*! Copyright (c) 2026 iinukami and contributors.
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * Additional terms under AGPLv3 Section 7: see LICENSE-ADDITIONAL.
+ */
 import { setTimeout as delay } from 'node:timers/promises';
 import type { Context, ChannelHandle, OutgoingMessage } from 'whalelife';
 import { object, account, id, safeError, QQError, type Config } from './config.ts';

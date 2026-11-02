@@ -1,3 +1,7 @@
+/*! Copyright (c) 2026 iinukami and contributors.
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * Additional terms under AGPLv3 Section 7: see LICENSE-ADDITIONAL.
+ */
 import { randomUUID } from 'node:crypto';
 import type { Context, PluginHandler } from 'whalelife';
 import { defaults, parseConfig, parseSegmentation, publicConfig, validateSelections, object, QQError, safeError, type Config } from './config.ts';

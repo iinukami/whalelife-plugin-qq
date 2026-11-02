@@ -1,3 +1,7 @@
+/*! Copyright (c) 2026 iinukami and contributors.
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * Additional terms under AGPLv3 Section 7: see LICENSE-ADDITIONAL.
+ */
 import { build } from 'esbuild';
 import { mkdir, copyFile, writeFile, readFile, cp } from 'node:fs/promises';
 import { resolve } from 'node:path';
@@ -18,6 +22,8 @@ await build({ entryPoints: ['src/gallery-bridge.ts'], outfile: target + '/sub/ga
   platform: 'node', format: 'esm', target: 'node24', packages: 'external' });
 await copyFile('sub/gallery/plugin.yaml', target + '/sub/gallery/plugin.yaml');
 await copyFile('README.md', target + '/README.md');
+for (const file of ['LICENSE', 'LICENSE-ADDITIONAL', 'NOTICE.md', 'THIRD_PARTY_NOTICES.md'])
+  await copyFile(file, target + '/' + file);
 await mkdir(target + '/scripts', { recursive: true });
 await copyFile('scripts/gallery-migration.mjs', target + '/scripts/gallery-migration.mjs');
 await cp('managed', target + '/managed', { recursive: true });
@@ -27,7 +33,7 @@ await copyFile('engine.lock.json', target + '/engine.lock.json');
 await copyFile('desktop-engine.lock.json', target + '/desktop-engine.lock.json');
 await copyFile('attach-engine.lock.json', target + '/attach-engine.lock.json');
 const pkg = JSON.parse(await readFile('package.json', 'utf8'));
-await writeFile(target + '/package.json', JSON.stringify({ name: pkg.name, version: pkg.version, private: true, type: 'module', engines: pkg.engines, dependencies: pkg.dependencies }, null, 2));
+await writeFile(target + '/package.json', JSON.stringify({ name: pkg.name, version: pkg.version, license: pkg.license, private: true, type: 'module', engines: pkg.engines, dependencies: pkg.dependencies }, null, 2));
 const npm = resolve(process.execPath, '..', 'node_modules/npm/bin/npm-cli.js');
 const result = spawnSync(process.execPath, [npm, 'install', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund'], { cwd: target, stdio: 'inherit', windowsHide: true });
 if (result.status !== 0) throw Error('Release dependency installation failed');
