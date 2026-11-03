@@ -7,6 +7,15 @@ import { randomUUID } from 'node:crypto';
 import { object, account, QQError, type Config } from './config.ts';
 
 type Pending = { resolve(value: unknown): void; reject(error: Error): void; dispose(): void };
+const desktopUnavailable = '桌面 QQ 接入不可用（账号离线或身份校验未通过），正在等待同账号恢复并重新核验。';
+function platformError(value: Record<string, unknown>) {
+  const code = Number.isSafeInteger(value.retcode) ? `（错误码 ${value.retcode}）` : '';
+  // Only our fixed diagnostic codes are reflected. Arbitrary protocol messages
+  // can contain message text, URLs, credentials or native stack traces.
+  const detail = [value.message, value.wording].includes('selected_account_offline') ? desktopUnavailable : '协议端报告操作失败。';
+  return new QQError(value.status === 'failed' ? 'platform_failed' : 'uncertain',
+    value.status === 'failed' ? detail + code : '协议端未确认完成，结果不确定，请核对，勿重复发送。' + code);
+}
 export interface LinkState { state: 'disconnected' | 'connecting' | 'online' | 'stopped'; error?: string; }
 export class OneBot {
   private socket?: WebSocket;
@@ -16,6 +25,7 @@ export class OneBot {
   private attempt = 0;
   private online = false;
   private stopped = false;
+  private checkingDesktop = false;
   private signal: AbortSignal;
   private config: Config;
   private onEvent: (event: Record<string, unknown>) => void;
@@ -43,8 +53,12 @@ export class OneBot {
         const call = this.pending.get(value.echo)!;
         this.pending.delete(value.echo); call.dispose();
         if (value.status === 'ok' && value.retcode === 0) call.resolve(value.data);
-        else call.reject(new QQError(value.status === 'failed' ? 'platform_failed' : 'uncertain',
-          value.status === 'failed' ? '协议端报告操作失败。' : '协议端未确认完成，结果不确定，请核对，勿重复发送。'));
+        else {
+          if (this.config.connectionMode === 'attach' && [value.message, value.wording].includes('selected_account_offline')) {
+            this.online = false; this.onState({ state: 'disconnected', error: desktopUnavailable });
+          }
+          call.reject(platformError(value));
+        }
       } else if (this.online && value.post_type === 'message' && Buffer.byteLength(bytes.toString()) <= 256 * 1024) {
         try { this.onEvent(value); } catch { /* callback boundary */ }
       }
@@ -69,15 +83,35 @@ export class OneBot {
       this.stop(); this.onState({ state: 'stopped', error: '登录账号与配置不符，已停止连接。' }); return;
     }
     if (this.socket !== ws || this.stopped || this.signal.aborted) return;
-    this.online = true; this.attempt = 0;
-    this.onState({ state: 'online' });
+    this.attempt = 0;
+    if (this.config.connectionMode === 'attach') await this.checkDesktop(ws);
+    else { this.online = true; this.onState({ state: 'online' }); }
+    if (this.socket !== ws || this.stopped || this.signal.aborted) return;
     let pong = true;
     ws.on('pong', () => { pong = true; });
     this.ping = setInterval(() => {
       if (!pong) { ws.terminate(); return; }
       pong = false; if (ws.readyState === WebSocket.OPEN) ws.ping();
+      if (this.config.connectionMode === 'attach') void this.checkDesktop(ws);
     }, 15000);
     this.ping.unref();
+  }
+  private async checkDesktop(ws: WebSocket) {
+    if (this.checkingDesktop || this.socket !== ws || this.stopped) return;
+    this.checkingDesktop = true;
+    try {
+      // get_status/get_login_info use cached NapCat data. This read-only action
+      // actually crosses our native session guard; never retry an external send.
+      await this.request('get_friend_list', {}, this.signal, true);
+      if (this.socket === ws && !this.stopped && !this.signal.aborted) {
+        this.online = true; this.onState({ state: 'online' });
+      }
+    } catch (e) {
+      if (this.socket === ws && !this.stopped && !this.signal.aborted) {
+        this.online = false;
+        this.onState({ state: 'disconnected', error: e instanceof QQError ? e.message : '桌面 QQ 接入核验未完成。' });
+      }
+    } finally { this.checkingDesktop = false; }
   }
   request(action: 'get_friend_list', params: Record<string, unknown>, signal: AbortSignal): Promise<unknown[]>;
   request(action: string, params: Record<string, unknown>, signal: AbortSignal, handshake?: boolean, timeoutMs?: number): Promise<Record<string, unknown>>;

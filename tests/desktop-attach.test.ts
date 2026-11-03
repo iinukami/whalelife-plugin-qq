@@ -50,19 +50,23 @@ test('closed QQ stays disconnected on reload; corrupted selection is preserved',
   await assert.rejects(attach.resume(selected, signal), /原文件已保留/); assert.equal(await readFile(file, 'utf8'), '{bad');
 });
 
-function nativeFixture() {
+function nativeFixture(factory = createAgent) {
   let nextId = 0, nativeLogins = 0, initialize = 0;
+  let current: any = { uid: 'u_test', status: 10 }, mappedAccount = '100001';
+  const globals = {};
   const listeners = new Map<number, any>(); const events: string[] = [];
+  let messageListener: any;
+  const emit = (info: any) => { current = info; for (const listener of listeners.values()) listener.onSelfStatusChanged(info); };
   const profile = {
     addKernelProfileListener(listener: any) { const id = ++nextId; listeners.set(id, listener); return id; },
     removeKernelProfileListener(id: number) { listeners.delete(id); },
-    getSelfStatus() { for (const listener of listeners.values()) listener.onSelfStatusChanged({ uid: 'u_test', status: 10 }); return Promise.resolve({ result: 0 }); },
-    getUinByUid() { return new Map([['u_test', '100001']]); },
+    getSelfStatus() { emit(current); return Promise.resolve({ result: 0 }); },
+    getUinByUid() { return new Map([['u_test', mappedAccount]]); },
   };
   const login = { getLoginList: async () => ({ LocalLoginInfoList: [{ uin: '100001', nickName: 'Test' }] }),
     addKernelLoginListener() { nativeLogins++; throw Error('native login must not be registered'); },
     quickLoginWithUin() { nativeLogins++; }, getQRCodePicture() { nativeLogins++; } };
-  const session = { getProfileService: () => profile, getMsgService: () => ({ sendMsg() { events.push('sent'); } }),
+  const session = { getProfileService: () => profile, getMsgService: () => ({ sendMsg() { events.push('sent'); }, addKernelMsgListener(listener: any) { messageListener = listener; } }),
     init() { throw Error('must not reinitialize'); }, close() { throw Error('must not close QQ'); } };
   const runtime = { type: 'browser', env: {} as Record<string, string>, mainModule: { filename: 'C:\\QQ\\resources\\app\\application.asar\\main.js' },
     dlopen(module: any) { module.exports = { NodeIQQNTWrapperSession: { getNTWrapperSession: () => session }, NodeIKernelLoginService: { get: () => login } }; } };
@@ -74,10 +78,88 @@ function nativeFixture() {
     } }));
     assert.throws(() => facade.getQRCodePicture(), /desktop_login_owned_by_user/);
   } });
-  const agent = createAgent(runtime, {}, load);
+  const agent = factory(runtime, globals, load);
   const input = { deadline: Date.now() + 10000, legacyWorkdir: 'C:\\old', workdir: 'C:\\owned', framework: 'C:\\framework', accountId: '100001', uid: 'u_test' };
-  return { agent, input, listeners, events, runtime, counts: () => ({ nativeLogins, initialize }), guarded: () => guarded };
+  return { agent, input, listeners, events, runtime, emit, globals,
+    mapAccount: (account: string) => { mappedAccount = account; },
+    emitMessage: () => messageListener?.onMessage(), upgrade: () => createAgent(runtime, globals, load),
+    counts: () => ({ nativeLogins, initialize }), guarded: () => guarded };
 }
+
+test('offline pauses native calls and callbacks; verified same-account recovery restores both without new login', async () => {
+  const f = nativeFixture(); await f.agent.run({ ...f.input, operation: 'connect' });
+  let received = 0;
+  const messages = f.guarded().getMsgService();
+  messages.addKernelMsgListener({ onMessage() { received++; } });
+  for (let i = 0; i < 3; i++) {
+    f.emit({ uid: 'u_test', status: 20 });
+    assert.throws(() => messages.sendMsg(), /selected_account_offline/);
+    f.emitMessage(); assert.equal(received, i);
+    f.emit({ uid: 'u_test', status: 10 });
+    messages.sendMsg(); f.emitMessage(); assert.equal(received, i + 1);
+    await f.agent.run({ ...f.input, operation: 'connect' });
+  }
+  assert.equal(f.events.length, 3); assert.equal(f.listeners.size, 1);
+  assert.deepEqual(f.counts(), { nativeLogins: 0, initialize: 1 });
+});
+
+test('incomplete status cannot enable operations; changed UID or account mapping stays blocked', async () => {
+  for (const changed of ['uid', 'uin']) {
+    const f = nativeFixture(); await f.agent.run({ ...f.input, operation: 'connect' });
+    for (const info of [{ status: 10 }, { uid: 'u_test' }, null, { uid: 'u_test', status: 0 }]) {
+      f.emit(info); assert.throws(() => f.guarded().getMsgService(), /selected_account_offline/);
+      f.emit({ uid: 'u_test', status: 50 }); f.guarded().getMsgService();
+    }
+    f.mapAccount(''); f.emit({ uid: 'u_test', status: 10 });
+    assert.throws(() => f.guarded().getMsgService(), /selected_account_offline/);
+    f.mapAccount('100001'); f.emit({ uid: 'u_test', status: 10 }); f.guarded().getMsgService();
+    if (changed === 'uin') f.mapAccount('100002');
+    f.emit({ uid: changed === 'uid' ? 'other' : 'u_test', status: 10 });
+    f.mapAccount('100001'); f.emit({ uid: 'u_test', status: 10 });
+    assert.throws(() => f.guarded().getMsgService(), /selected_account_offline/);
+    await assert.rejects(f.agent.run({ ...f.input, operation: 'connect' }), /bridge_changed/);
+    assert.deepEqual(f.counts(), { nativeLogins: 0, initialize: 1 });
+  }
+});
+
+test('failed framework is never revived by online events or reconnect', async () => {
+  const f = nativeFixture(); await f.agent.run({ ...f.input, operation: 'connect' });
+  const state = (f.globals as any)[Symbol.for('whalelife.qq.desktop-attach.v1')];
+  state.failed = true; f.emit({ uid: 'u_test', status: 10 });
+  assert.throws(() => f.guarded().getMsgService(), /selected_account_offline/);
+  await assert.rejects(f.agent.run({ ...f.input, operation: 'connect' }), /bridge_changed/);
+});
+
+test('concurrent connects await a single initialization', async () => {
+  const f = nativeFixture();
+  await Promise.all(Array.from({ length: 3 }, () => f.agent.run({ ...f.input, operation: 'connect' })));
+  assert.deepEqual(f.counts(), { nativeLogins: 0, initialize: 1 }); assert.equal(f.listeners.size, 1);
+  f.guarded().getMsgService().sendMsg(); assert.deepEqual(f.events, ['sent']);
+});
+
+test('live v1 upgrade repairs the existing proxies, keeps one framework, and does not duplicate recovery listeners', async () => {
+  // Frozen 0.14.1 agent, rather than an imitation of the old guard.
+  const old = createRequire(import.meta.url)('./fixtures/desktop-agent-v1.cjs');
+  const f = nativeFixture(old.createAgent); await f.agent.run({ ...f.input, operation: 'connect' });
+  const messages = f.guarded().getMsgService(); let received = 0;
+  messages.addKernelMsgListener({ onMessage() { received++; } });
+  f.emit({ uid: 'u_test', status: 20 }); f.emit({ uid: 'u_test', status: 10 });
+  assert.throws(() => messages.sendMsg(), /selected_account_offline/);
+  await assert.rejects(f.agent.run({ ...f.input, operation: 'connect' }), /bridge_changed/);
+  for (let i = 0; i < 3; i++) {
+    await f.upgrade().run({ ...f.input, operation: 'connect' });
+    assert.equal(f.listeners.size, 2); // Original listener plus one recovery monitor.
+    f.emit({ uid: 'u_test', status: 20 });
+    assert.throws(() => messages.sendMsg(), /selected_account_offline/);
+    f.emitMessage(); assert.equal(received, i);
+    f.emit({ uid: 'u_test', status: 10 }); messages.sendMsg(); f.emitMessage();
+  }
+  assert.equal(received, 3); assert.equal(f.events.length, 3);
+  assert.deepEqual(f.counts(), { nativeLogins: 0, initialize: 1 });
+  f.emit({ uid: 'other', status: 10 }); f.emit({ uid: 'u_test', status: 10 });
+  await assert.rejects(f.upgrade().run({ ...f.input, operation: 'connect' }), /bridge_changed/);
+  assert.throws(() => messages.sendMsg(), /selected_account_offline/);
+});
 
 test('late attach uses existing native session without QR, login, init or desktop restart; repeated connect loads once', async () => {
   const f = nativeFixture();
