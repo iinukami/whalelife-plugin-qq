@@ -6,18 +6,21 @@ import type { Context, ToolSession } from 'whalelife';
 import { account, object, QQError, safeError } from './config.ts';
 import { digest } from './messages.ts';
 import type { QQRuntime } from './runtime.ts';
+import { blockedDelivery, unknownDelivery } from './text-delivery.ts';
 
 export function registerQQTools(ctx: Context, current: () => QQRuntime | undefined) {
-  const runtime = () => {
+  const runtime = (allowOffline = false) => {
     ctx.signal.throwIfAborted();
     const value = current();
-    if (!value || value.state.state !== 'online') throw new QQError('offline', 'QQ 尚未在线，未发送。');
+    if (!value || (!allowOffline && value.state.state !== 'online')) throw new QQError('offline', 'QQ 尚未在线，本次调用未发送。');
     return value;
   };
   // Catch expected business failures here: they must not fault the plugin worker.
   const failure = (error: unknown, session: ToolSession) => ({
     status: session.signal?.aborted ? 'cancelled' : 'blocked', confirmed: false,
     error: safeError(error), retryAutomatically: false,
+    delivery: error instanceof QQError && ['offline', 'permission', 'session', 'input', 'invalid_account', 'invalid_id', 'peer', 'binding', 'binding_retry_blocked', 'transient'].includes(error.code)
+      ? blockedDelivery() : unknownDelivery(),
     ...(error instanceof QQError && error.code === 'binding_retry_blocked' ? { repeatBlocked: true } : {}),
   });
   ctx.tools.register({
@@ -36,7 +39,7 @@ export function registerQQTools(ctx: Context, current: () => QQRuntime | undefin
   });
   ctx.tools.register({
     name: 'qq_send_message', danger: 'ask', origin: { platform: 'QQ 私聊', action: '发送私聊文字' },
-    description: '向已授权 QQ 好友发送文字，并等待实际平台回执。先用 qq_list_recipients 核对明确的收件人；只能发送用户已授权或约定的消息。messageId 使用该约定/动作的稳定标识，同一动作重复调用保持同一 ID 和文字，不能换 ID 重试失败或不确定结果。只有 status=sent 且 confirmed=true 才算确认发送。绑定冲突返回 blocked，不自动排队补发。QQ 入站的最终文字会自动回复，不要用本工具重复发送同一回复。',
+    description: '向已授权 QQ 好友发送文字，并等待实际平台回执。先用 qq_list_recipients 核对明确的收件人；只能发送用户已授权或约定的消息。messageId 使用该约定/动作的稳定标识，同一动作重复调用保持同一 ID 和文字，不能换 ID 重试失败或不确定结果。只有 status=sent 且 confirmed=true 才算确认发送。delivery 给出逐段确认数、明确未发送数和未知数；scope=current_call 仅指本次调用被阻止，不能推断旧动作。发送确认不等于已读，失败或未回复也不能推断用户不愿理睬。绑定冲突返回 blocked，不自动排队补发。QQ 入站的最终文字会自动回复，不要用本工具重复发送同一回复。',
     schema: { type: 'object', properties: {
       userId: { type: 'string', description: '经白名单工具核实的收件人 QQ 号。' },
       messageId: { type: 'string', minLength: 1, maxLength: 128, description: '约定/动作的稳定 ID；重复调用不更换，不使用每次随机的新 ID。' },
@@ -45,7 +48,9 @@ export function registerQQTools(ctx: Context, current: () => QQRuntime | undefin
     async run(args, session) {
       try {
         if (session.transientContext) throw new QQError('transient', '本轮含临时外部资料，主动私聊工具暂不支持无正文持久化；QQ 入站最终回复仍可当次交付。');
-        const value = runtime(), input = object(args);
+        // Existing action receipts remain readable while offline; new submissions
+        // are rejected with phase evidence by the transport itself.
+        const value = runtime(true), input = object(args);
         if (session.permission === 'off' || value.config.permission !== 'full')
           throw new QQError('permission', 'QQ 主动发送未获得完全执行权限，未发送。');
         if (!session.id || typeof session.id !== 'string') throw new QQError('session', '缺少可信会话归属，未发送。');

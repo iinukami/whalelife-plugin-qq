@@ -14,9 +14,9 @@ import { OutboundMedia, type MediaAction, type MediaKey, type MediaSendOptions }
 import { SpaceTransport } from './space/transport.ts';
 import { SpaceWebTransport } from './space/web-transport.ts';
 import type { PublishPayload } from './space/types.ts';
+import { textDeliveryReceipt, unknownDelivery, type Delivery, type TextDeliveryReceipt } from './text-delivery.ts';
 
 interface Inbox { version: 1; fingerprint: string; state: 'preparing' | 'ready' | 'failed'; text?: string; sessionId?: string; }
-interface Delivery { version: 1; fingerprint: string; transient?: true; partCount?: number; texts?: string[]; intervals?: number[]; parts: { state: 'pending' | 'sent' | 'failed'; messageId?: string }[]; }
 export interface Notice { at: string; messageId?: string; status: string; detail?: string; }
 export class QQRuntime {
   private ctx: Context;
@@ -41,6 +41,7 @@ export class QQRuntime {
   private modelSend?: { sessionId: string; peer: string; text: string };
   private inflight = new Set<string>();
   private lastSent = 0;
+  private deliveryResults = new Map<string, TextDeliveryReceipt>();
   private stopped = false;
   private stopPromise?: Promise<void>;
   state: LinkState = { state: 'disconnected' };
@@ -210,11 +211,56 @@ export class QQRuntime {
       if (saved.state !== 'ready') await normalize(sessionId);
       if (typeof saved.text !== 'string') throw new QQError('state', '收件记录不完整，已停止处理。');
       this.signal.throwIfAborted();
-      const result = await this.channel.receive({ peer: event.peer, sender: event.sender, messageId: event.messageId, text: saved.text }, { signal: this.signal });
-      this.notice(result.status, event.messageId, result.status === 'sent' ? undefined : '本条消息未确认送达；请核对状态，不会自动重放模型或发送。');
+      const result = await this.describeDelivery(await this.channel.receive({ peer: event.peer, sender: event.sender, messageId: event.messageId, text: saved.text }, { signal: this.signal }));
+      this.notice(result.status, event.messageId, result.delivery.summary);
     } finally { this.incomingBinding = undefined; }
   }
   private async deliver(message: OutgoingMessage, signal: AbortSignal) {
+    let ledger: Delivery | undefined, failure: unknown, failed = false;
+    try { await this.deliverParts(message, signal, value => { ledger = value; }); }
+    catch (error) { failed = true; failure = error; }
+    const receipt = ledger ? textDeliveryReceipt(ledger) : unknownDelivery();
+    this.deliveryResults.set(message.deliveryId, receipt);
+    if (this.deliveryResults.size > 128) this.deliveryResults.delete(this.deliveryResults.keys().next().value!);
+    // Auto-reply failures happen after the model's final text. Record facts through
+    // the public memory API so its next turn can distinguish writing from sending.
+    if (message.replyTo !== undefined && (receipt.outcome !== 'sent' || ledger?.reportFailure)) {
+      try {
+        if (ledger && receipt.totalParts !== 0 && receipt.outcome !== 'sent' && !ledger.reportFailure) {
+          ledger.reportFailure = true;
+          await this.ctx.config.save(`delivery-${digest(message.deliveryId)}.json`, ledger).catch(() => {});
+        }
+        await this.ctx.memory.recordExperience(message.sessionId, {
+          event_id: `qq-text:${digest(message.deliveryId)}:${receipt.outcome}:${receipt.sentParts}:${receipt.unknownParts}`,
+          outcome: receipt.outcome === 'sent' ? 'succeeded' : receipt.unknownParts !== 0 ? 'pending' : 'failed',
+          text: `QQ 自动回复投递结果（入站消息 ${message.replyTo}）：${receipt.summary}`,
+          origin: { platform: 'QQ 私聊', action: '自动回复投递结果' }, occurred_at: new Date().toISOString(),
+        });
+      } catch { this.notice('delivery_memory_unavailable', message.replyTo, '投递事实未能写入会话；不会因此重发。'); }
+    }
+    if (failed) throw new QQError(failure instanceof QQError ? failure.code : 'delivery', receipt.summary + ' ' + safeError(failure));
+  }
+  private async describeDelivery(result: Awaited<ReturnType<ChannelHandle['send']>>) {
+    let delivery = result.deliveryId ? this.deliveryResults.get(result.deliveryId) : undefined;
+    if (result.deliveryId) this.deliveryResults.delete(result.deliveryId);
+    if (!delivery && result.deliveryId) {
+      try {
+        const ledger = await this.ctx.config.read<Delivery>(`delivery-${digest(result.deliveryId)}.json`);
+        if (ledger.version === 1) delivery = textDeliveryReceipt(ledger);
+      } catch { /* Missing/corrupt storage cannot prove that a send did not happen. */ }
+    }
+    delivery ??= unknownDelivery();
+    // The host only records sent after the adapter confirms completion. A failed
+    // private receipt write must not turn that durable confirmation into unknown.
+    if (result.status === 'sent' && delivery.outcome !== 'sent') {
+      const total = delivery.totalParts || null;
+      delivery = { ...delivery, outcome: 'sent', totalParts: total, sentParts: total,
+        notSentParts: 0, unknownParts: 0, unattemptedParts: 0,
+        summary: '渠道已记录平台确认全部发送；逐段消息 ID 可能未保存。发送确认不代表对方已读。' };
+    }
+    return { ...result, delivery, ...(result.status !== 'sent' && result.status !== 'generation_failed' ? { error: delivery.summary } : {}) };
+  }
+  private async deliverParts(message: OutgoingMessage, signal: AbortSignal, observe: (ledger: Delivery) => void) {
     signal.throwIfAborted();
     if (!message.peer.startsWith('direct:')) throw new QQError('peer', '首版只支持好友私聊。');
     const target = account(message.peer.slice(7));
@@ -224,9 +270,11 @@ export class QQRuntime {
     const fingerprint = digest([message.peer, message.text]);
     if (saved.version !== undefined && saved.version !== 1) throw new QQError('state_version', '发送状态版本不受支持。');
     if (saved.fingerprint && saved.fingerprint !== fingerprint) throw new QQError('delivery_conflict', '投递标识与内容不匹配。');
+    if (!Object.keys(saved).length) observe({ version: 1, fingerprint, partCount: 0, parts: [] });
     // A transient reply is sent once live. Its text/plan must never enter private storage,
     // and an existing transient receipt is never permission to reconstruct or replay it.
     if (saved.transient) {
+      observe(saved as Delivery);
       if (saved.parts?.length && saved.parts.length === saved.partCount && saved.parts.every(p => p.state === 'sent')) return;
       throw new QQError('uncertain', '临时资料回复已处理，不能重放，请人工核对。');
     }
@@ -240,8 +288,10 @@ export class QQRuntime {
     if (!Array.isArray(parts) || !parts.length || parts.length > 64 || parts.some(t => typeof t !== 'string' || !t || Array.from(t).length > 1500)
       || !Array.isArray(plan.intervals) || plan.intervals.length !== parts.length || plan.intervals.some(ms => !Number.isFinite(ms) || ms < 0 || ms > 60000))
       throw new QQError('reply_size', '发送分段记录无效或回复过长，原记录已保留。');
-    saved = { version: 1, fingerprint, ...(message.transient ? { transient: true as const, partCount: parts.length } : { texts: parts, intervals: plan.intervals }), parts: saved.parts ?? [] };
+    saved = { version: 1, fingerprint, partCount: parts.length, ...(saved.reportFailure ? { reportFailure: true } : {}),
+      ...(message.transient ? { transient: true as const } : { texts: parts, intervals: plan.intervals }), parts: saved.parts ?? [] };
     const ledger = saved as Delivery;
+    observe(ledger);
     await this.ctx.config.save(file, ledger);
     for (let i = 0; i < parts.length; i++) {
       signal.throwIfAborted();
@@ -250,8 +300,8 @@ export class QQRuntime {
       await delay(Math.max(plan.intervals[i], this.config.minReplyIntervalMs - (Date.now() - this.lastSent)), undefined, { signal });
       signal.throwIfAborted();
       ledger.parts[i] = { state: 'pending' };
-      await this.ctx.config.save(file, ledger);
-      signal.throwIfAborted();
+      try { await this.ctx.config.save(file, ledger); signal.throwIfAborted(); }
+      catch (error) { ledger.parts[i] = { state: 'failed', notSent: true }; throw error; }
       let result: Record<string, unknown>;
       try {
         result = await this.bot.request('send_private_msg', {
@@ -265,7 +315,9 @@ export class QQRuntime {
         this.lastSent = Date.now();
       } catch (error) {
         if (error instanceof QQError && ['platform_failed', 'offline'].includes(error.code) && !signal.aborted) {
-          ledger.parts[i] = { state: 'failed' }; await this.ctx.config.save(file, ledger);
+          ledger.parts[i] = { state: 'failed', ...(error.notSent ? { notSent: true as const } : {}) }; await this.ctx.config.save(file, ledger);
+        } else if (error instanceof QQError && error.notSent) {
+          ledger.parts[i] = { state: 'failed', notSent: true }; await this.ctx.config.save(file, ledger);
         }
         throw error;
       }
@@ -309,7 +361,7 @@ export class QQRuntime {
       }
       signal.throwIfAborted();
       if (options.modelGenerated && options.sessionId) this.modelSend = { sessionId: options.sessionId, peer, text: input.text };
-      try { return await this.channel.send({ peer, messageId: input.messageId, text: input.text }, { signal }); }
+      try { return await this.describeDelivery(await this.channel.send({ peer, messageId: input.messageId, text: input.text }, { signal })); }
       finally { this.modelSend = undefined; }
     });
     this.directSending = task.catch(() => {});

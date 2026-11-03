@@ -72,10 +72,22 @@ test('external protocol keeps its existing handshake and exposes only bounded er
   const f = await transport(t, 'external');
   assert.equal(f.state().state, 'online'); assert.deepEqual(f.calls, ['get_login_info']);
   await assert.rejects(f.bot.request('send_private_msg', {}, f.controller.signal), (e: any) => {
-    assert.equal(e.code, 'platform_failed'); assert.match(e.message, /1200/);
+    assert.equal(e.code, 'platform_failed'); assert.match(e.message, /1200/); assert.equal(e.notSent, false);
     assert.ok(!e.message.includes('PRIVATE-TEXT')); assert.ok(!e.message.includes('secret')); return true;
   });
   await f.tick(); assert.ok(!f.calls.includes('get_friend_list'));
+});
+
+test('only pre-submit refusal and the bundled plain-text native guard prove no send', async t => {
+  const f = await transport(t, 'attach', false);
+  f.setOffline(true);
+  const params = { auto_escape: true, message: [{ type: 'text', data: { text: 'test' } }] };
+  await assert.rejects(f.bot.request('send_private_msg', params, f.controller.signal), (e: any) => e.notSent === true);
+  const before = f.calls.length;
+  await assert.rejects(f.bot.request('send_private_msg', params, f.controller.signal), (e: any) => e.notSent === true);
+  assert.equal(f.calls.length, before);
+  f.setOffline(false); await f.tick(); await until(() => f.state().state === 'online'); f.setOffline(true);
+  await assert.rejects(f.bot.request('send_private_msg', { message: [{ type: 'image' }] }, f.controller.signal), (e: any) => e.notSent === false);
 });
 
 test('wrong login identity remains stopped and never starts native health or business actions', async t => {

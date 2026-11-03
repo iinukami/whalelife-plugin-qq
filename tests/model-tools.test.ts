@@ -196,7 +196,8 @@ for (const mode of ['failed', 'async', 'missing-id']) test(`platform ${mode} can
   });
   const args = { userId: '200002', messageId: mode, text: 'test' };
   const first = await call(f, id, args); assert.equal(first.result.confirmed, false); assert.notEqual(first.result.status, 'sent');
-  await call(f, id, args); assert.equal(sends(f).length, 1);
+  const repeated = await call(f, id, args); assert.equal(sends(f).length, 1);
+  assert.equal(repeated.result.delivery.outcome, 'unknown'); assert.equal(repeated.result.delivery.unknownParts, 1);
   assert.equal(await f.app.runtime.services.get('witness')!.value.ping(), 'alive');
 });
 
@@ -219,6 +220,8 @@ test('stop cancels segmented tool wait, removes tools, and retains receipts on r
   await f.app.runtime.action('qq', 'stop'); await pending;
   assert.equal(sends(f).length, 1); assert.ok(!f.app.tools.list().some((x: any) => x.function.name.startsWith('qq_')));
   await f.app.runtime.action('qq', 'start'); await f.online();
-  await call(f, id, args); assert.equal(sends(f).length, 1);
+  const repeated = await call(f, id, args); assert.equal(sends(f).length, 1);
+  assert.equal(repeated.result.delivery.outcome, 'partial'); assert.equal(repeated.result.delivery.sentParts, 1);
+  assert.equal(repeated.result.delivery.unknownParts, 0);
   assert.equal(await f.app.runtime.services.get('witness')!.value.ping(), 'alive');
 });

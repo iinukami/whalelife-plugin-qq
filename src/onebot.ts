@@ -6,15 +6,19 @@ import WebSocket from 'ws';
 import { randomUUID } from 'node:crypto';
 import { object, account, QQError, type Config } from './config.ts';
 
-type Pending = { resolve(value: unknown): void; reject(error: Error): void; dispose(): void };
+type Pending = { resolve(value: unknown): void; reject(error: Error): void; dispose(): void; plainText: boolean };
 const desktopUnavailable = '桌面 QQ 接入不可用（账号离线或身份校验未通过），正在等待同账号恢复并重新核验。';
-function platformError(value: Record<string, unknown>) {
+function platformError(value: Record<string, unknown>, guardedText = false) {
   const code = Number.isSafeInteger(value.retcode) ? `（错误码 ${value.retcode}）` : '';
   // Only our fixed diagnostic codes are reflected. Arbitrary protocol messages
   // can contain message text, URLs, credentials or native stack traces.
   const detail = [value.message, value.wording].includes('selected_account_offline') ? desktopUnavailable : '协议端报告操作失败。';
   return new QQError(value.status === 'failed' ? 'platform_failed' : 'uncertain',
-    value.status === 'failed' ? detail + code : '协议端未确认完成，结果不确定，请核对，勿重复发送。' + code);
+    value.status === 'failed' ? detail + code : '协议端未确认完成，结果不确定，请核对，勿重复发送。' + code,
+    // In the bundled native plain-text path this exact guard throws before sendMsg.
+    // Do not generalize to media, external protocols or arbitrary failed envelopes.
+    guardedText && value.status === 'failed' && value.retcode === 1200 &&
+      [value.message, value.wording].includes('selected_account_offline'));
 }
 export interface LinkState { state: 'disconnected' | 'connecting' | 'online' | 'stopped'; error?: string; }
 export class OneBot {
@@ -57,7 +61,7 @@ export class OneBot {
           if (this.config.connectionMode === 'attach' && [value.message, value.wording].includes('selected_account_offline')) {
             this.online = false; this.onState({ state: 'disconnected', error: desktopUnavailable });
           }
-          call.reject(platformError(value));
+          call.reject(platformError(value, this.config.connectionMode === 'attach' && call.plainText));
         }
       } else if (this.online && value.post_type === 'message' && Buffer.byteLength(bytes.toString()) <= 256 * 1024) {
         try { this.onEvent(value); } catch { /* callback boundary */ }
@@ -116,11 +120,11 @@ export class OneBot {
   request(action: 'get_friend_list', params: Record<string, unknown>, signal: AbortSignal): Promise<unknown[]>;
   request(action: string, params: Record<string, unknown>, signal: AbortSignal, handshake?: boolean, timeoutMs?: number): Promise<Record<string, unknown>>;
   request(action: string, params: Record<string, unknown>, signal: AbortSignal, handshake = false, timeoutMs = this.config.requestTimeoutMs): Promise<Record<string, unknown> | unknown[]> {
-    signal.throwIfAborted(); this.signal.throwIfAborted();
+    if (signal.aborted || this.signal.aborted) throw new QQError('cancelled', '操作在提交前已取消。', true);
     const ws = this.socket;
     if (this.stopped || !ws || ws.readyState !== WebSocket.OPEN || (!this.online && !handshake))
-      return Promise.reject(new QQError('offline', 'QQ 协议端尚未连接。'));
-    if (this.pending.size >= 64) return Promise.reject(new QQError('busy', '请求过多，请稍后重试。'));
+      return Promise.reject(new QQError('offline', 'QQ 协议端尚未连接。', true));
+    if (this.pending.size >= 64) return Promise.reject(new QQError('busy', '请求过多，请稍后重试。', true));
     const echo = randomUUID();
     return new Promise((resolve, reject) => {
       const done = (error: Error) => {
@@ -130,7 +134,9 @@ export class OneBot {
       const abort = () => done(new QQError('cancelled', '操作已取消，已提交的外部动作需核对。'));
       const timer = setTimeout(() => done(new QQError('timeout', '协议端响应超时，结果可能不确定。')), timeoutMs);
       timer.unref();
-      this.pending.set(echo, { resolve: value => resolve(action === 'get_friend_list' ? (Array.isArray(value) ? value : []) : object(value)),
+      this.pending.set(echo, { plainText: action === 'send_private_msg' && params.auto_escape === true && Array.isArray(params.message) &&
+          params.message.length > 0 && params.message.every(p => object(p).type === 'text'),
+        resolve: value => resolve(action === 'get_friend_list' ? (Array.isArray(value) ? value : []) : object(value)),
         reject, dispose: () => { clearTimeout(timer); signal.removeEventListener('abort', abort); } });
       signal.addEventListener('abort', abort, { once: true });
       ws.send(JSON.stringify({ action, params, echo }), error => {

@@ -128,4 +128,12 @@ test('current plugin runs unchanged on actual 213b52b host with legacy independe
   desktop.setGenerate(async () => ({ text: '旧主干。也分段！', toolCalls: [] }));
   desktop.send({ message_id: 2 }); await sent(desktop, '2');
   assert.deepEqual(desktop.calls.filter(c => c.action === 'send_private_msg').slice(-2).map(c => c.params.message[0].data.text), ['旧主干。', '也分段！']);
+  desktop.setAction((data, socket) => {
+    if (data.action !== 'send_private_msg') return false;
+    socket.send(JSON.stringify({ echo: data.echo, status: 'failed', retcode: 1200, data: {} })); return true;
+  });
+  desktop.send({ message_id: 3 }); await until(async () => (await desktop.status()).recent.some((n: any) => n.messageId === '3' && n.status === 'delivery_failed'));
+  const legacyId = Object.keys(await desktop.app.memory.listSessionMeta())[0];
+  assert.ok((await desktop.app.memoryEngine.state(legacyId)).records.some((r: any) => r.source === 'qq' && /自动回复投递结果.*结果未知/.test(r.text)));
+  assert.equal(modelSend.result.delivery.outcome, 'sent');
 });

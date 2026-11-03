@@ -6,7 +6,8 @@ import type { Context, Permission } from 'whalelife';
 
 export class QQError extends Error {
   readonly code: string;
-  constructor(code: string, message: string) { super(message); this.code = code; }
+  readonly notSent: boolean;
+  constructor(code: string, message: string, notSent = false) { super(message); this.code = code; this.notSent = notSent; }
 }
 export function safeError(error: unknown): string {
   return error instanceof QQError ? error.message : '操作未完成，请检查连接或配置；敏感错误详情未输出。';
