@@ -13,6 +13,8 @@ export interface QQSpaceTransport {
   qzonePublish(input: PublishPayload, options: { signal: AbortSignal }): Promise<TransportReceipt>;
   qzoneSocialApiVersion?: string;
   qzoneReferenceApiVersion?: string;
+  qzoneVideoApiVersion?: '1.0.0';
+  qzoneReadVideo?(input: { sessionId: string; ref: string; index: number }, options: { signal: AbortSignal }): Promise<{ mime: 'video/mp4' | 'video/webm'; base64: string }>;
   qzoneReferenceStatus?(input: ReferenceInput, options: { signal: AbortSignal }): Promise<ReferenceStatus>;
   qzoneBrowse?(input: BrowseInput, options: { signal: AbortSignal }): Promise<BrowseResult>;
   qzoneResolve?(input: { sessionId: string; ref: string }, options: { signal: AbortSignal }): Promise<PostTarget>;
@@ -57,6 +59,7 @@ export interface PostTarget {
 }
 export interface BrowsePost extends Omit<SpacePost, 'images'> {
   ref: string; imageCount: number; interactive: boolean;
+  videoCount?: number;
   comments: (SpacePost['comments'][number] & { replyable: boolean })[];
 }
 export interface BrowseResult { accountId: string; posts: BrowsePost[]; cursor?: string; source?: 'feed' | 'profile'; hasMore: boolean; skipped: number; diagnostics?: Record<string, number> }

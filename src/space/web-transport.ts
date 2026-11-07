@@ -9,10 +9,11 @@ import { account, object, QQError } from '../config.ts';
 import type { OneBot } from '../onebot.ts';
 import { sessionId } from './policy.ts';
 import { imageUrl, parseFeeds, parseProfileFeeds, responseObject, successful, type ParsedPost } from './feeds.ts';
+import { videoUrl, readVideoBytes } from './video.ts';
 import type { BrowseInput, BrowseResult, Interaction, PostTarget, SocialTransportReceipt, ReferenceInput, ReferenceStatus, ReferenceFailure } from './types.ts';
 
 type Capability = { sessionId: string; accountId: string; expires: number } & (
-  { kind: 'post'; post: PostTarget; images: string[] } | { kind: 'cursor'; value: string; authorId?: string; source?: 'feed' | 'profile' });
+  { kind: 'post'; post: PostTarget; images: string[]; videos?: string[] } | { kind: 'cursor'; value: string; authorId?: string; source?: 'feed' | 'profile' });
 const LIMIT = 4 * 1024 * 1024;
 const referenceMessages: Record<ReferenceFailure, string> = {
   invalid_reference: '动态引用格式无效，请重新浏览并使用返回的完整引用。',
@@ -31,6 +32,7 @@ export class SpaceWebTransport {
   private identity: () => { accountId: string; online: boolean };
   private fetch: typeof httpFetch;
   private busy = false;
+  private videoBusy = false;
   constructor(bot: Pick<OneBot, 'request'>, signal: AbortSignal, identity: SpaceWebTransport['identity'], fetch = httpFetch) {
     this.bot = bot; this.signal = signal; this.identity = identity; this.fetch = fetch;
   }
@@ -145,10 +147,14 @@ export class SpaceWebTransport {
     const result = source === 'profile' ? parseProfileFeeds(raw, auth.accountId, count, start) : parseFeeds(raw, auth.accountId, count);
     const base = { accountId: auth.accountId, sessionId: sid, expires: Date.now() + 15 * 60000 };
     return { accountId: auth.accountId, posts: result.posts.filter(p => !authorId || p.authorId === authorId).map((p: ParsedPost) => {
-      const { images, text, hasVideo, comments, ...meta } = p;
+      const { images, videos, text, hasVideo, comments, ...meta } = p;
       const post = { ...meta, comments: comments.map(({ text: _text, ...c }) => c) };
+      const capability = { ...base, kind: 'post' as const, post, images, videos: [...videos] };
+      // Keep refs within the existing 65,536-character contract, including old
+      // image metadata. Unsupported excess videos are not advertised as readable.
+      while (capability.videos.length && Buffer.byteLength(JSON.stringify(capability)) > 49000) capability.videos.pop();
       return { accountId: p.accountId, authorId: p.authorId, tid: p.tid, kind: p.kind, interactive: p.interactive,
-        text, hasVideo, comments, imageCount: images.length, ref: this.seal({ ...base, kind: 'post', post, images }) };
+        text, hasVideo, comments, imageCount: images.length, videoCount: capability.videos.length, ref: this.seal(capability) };
     }), source, hasMore: result.hasMore, skipped: result.skipped, diagnostics: result.diagnostics,
       ...(result.cursor ? { cursor: this.seal({ ...base, kind: 'cursor', value: result.cursor, authorId, source }) } : {}) };
   }
@@ -161,6 +167,34 @@ export class SpaceWebTransport {
     const bytes = await this.bytes(response, 10 * 1024 * 1024, signal), meta = await sharp(bytes, { limitInputPixels: 40000000 }).metadata();
     if (!['png', 'jpeg', 'gif', 'webp'].includes(meta.format ?? '')) throw new QQError('image', '图片格式不受支持。');
     return { mime: 'image/' + meta.format, base64: bytes.toString('base64') };
+  }
+  async readVideo(input: { sessionId: string; ref: string; index: number }, options: { signal: AbortSignal }) {
+    const signal = AbortSignal.any([this.signal, options.signal, AbortSignal.timeout(60000)]);
+    signal.throwIfAborted();
+    if (this.videoBusy) throw new QQError('video_busy', '空间视频正在读取，请稍后再试。');
+    this.videoBusy = true;
+    try {
+      if (!input || Object.keys(input).some(k => !['sessionId', 'ref', 'index'].includes(k))) throw new QQError('video_input', '视频读取参数无效。');
+      const v = this.open(input.ref, input.sessionId);
+      if (v.kind !== 'post') throw new QQError('reference', '需要动态引用。');
+      if (!Array.isArray(v.videos) || !v.videos.length) throw new QQError('video_source', '该动态没有支持的可读取视频源，请重新浏览或选择其他视频。');
+      if (!Number.isInteger(input.index) || input.index < 0 || input.index > 7 || input.index >= v.videos.length) throw new QQError('video_index', '视频序号无效。');
+      const url = videoUrl(v.videos[input.index]);
+      if (!url) throw new QQError('video_source', '视频来源不受支持。');
+      const check = () => {
+        const current = this.identity();
+        if (!current.online || current.accountId !== v.accountId) throw new QQError('identity', 'QQ 账号或连接已变化。');
+      };
+      check();
+      // Signed native media does not need QZone cookies. Never follow a redirect
+      // to an origin outside this fixed transport contract.
+      const response = await this.fetch(url, { signal, redirect: 'error' });
+      return await readVideoBytes(response, signal, check);
+    } catch (error) {
+      if (signal.aborted) throw new QQError('video_cancelled', '视频读取已取消或超时。');
+      if (error instanceof QQError) throw error;
+      throw new QQError('video_download', '视频下载失败，请检查连接或重新浏览。');
+    } finally { this.videoBusy = false; }
   }
   async interact(input: { sessionId: string; ref: string; action: Interaction }, options: { signal: AbortSignal }): Promise<SocialTransportReceipt> {
     if (this.busy) return { status: 'not_submitted' };

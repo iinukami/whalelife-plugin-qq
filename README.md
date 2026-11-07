@@ -29,6 +29,10 @@ QQ 私聊接入，复用 WhaleLife 的模型配置、人格、会话与记忆。
 
 从 0.14.4 起提供可选 `qq.qzoneReferenceApiVersion = '1.0.0'` 和 `qq.qzoneReferenceStatus({sessionId, ref, expectedKind?}, {signal})`。`sessionId` 必须取可信工具会话，`expectedKind` 为 `post` 或 `cursor`。成功返回 `{valid:true,kind,expiresAt}`（毫秒时间戳）；失败返回 `{valid:false,reason,message}`。`reason` 为 `invalid_reference`、`unreadable_reference`、`offline`、`account_changed`、`session_mismatch`、`expired` 或 `wrong_kind`。诊断不访问网络，不返回原文、图片地址、账号或凭据，不延长原有 15 分钟有效期。无法解密可能是连接重载或引用损坏，不能据此认定实际过期。
 
+从 0.15.0 起提供可选 `qq.qzoneVideoApiVersion = '1.0.0'` 和 `qq.qzoneReadVideo({sessionId, ref, index}, {signal})`，返回 `{mime:'video/mp4'|'video/webm', base64}`。调用方从可信工具会话取 `sessionId`，使用 `qzoneBrowse` 返回的本会话 `ref` 和 `0 <= index < videoCount`（最多 8 个）。浏览结果的 `hasVideo` 保留原语义，新增 `videoCount` 仅统计引用内支持的原始视频源；封面、第三方播放器和不支持的来源不会冒充可读取视频。
+
+QQ 只在内存中读取经账号、会话、有效期校验的空间原生视频，不接受调用方提供 URL、路径或凭据。媒体固定来自 `photovideo.photo.qq.com` 的 MP4/WebM 地址，不携带空间 Cookie、不跟随重定向；单次最多 64 MiB、60 秒，同时只允许一次视频读取。取消、停用、账号变化或下载失败均不交付、不自动重试、不落盘。旧引用缺少视频来源时仍可用于原有功能，视频需要重新浏览。QQ 不解码或理解视频、不依赖视觉或图库插件；空间消费者按需把字节交给视觉公开服务，字节和签名地址不能返回模型或写入日志。
+
 空间插件适配：在捕获原有引用错误时，检测此可选入口并查询诊断，将固定 `message` 作为当轮临时反馈；旧父插件继续用原错误兜底。旧浏览/读图/解析入口及其错误文本保持不变，因此无需同时升级。浏览、读图没有动作 ID，其一般失败提示应要求检查连接或重新浏览，不应要求“用原动作 ID 查回执”；点赞、评论、转发仍按已有动作回执核对，诊断不是重试授权。无需改动空间插件即可解除临时上下文中的 QQ 私聊限制。
 
 此接口只反映查询当下的引用状态，不能倒推历史失败原因；若返回有效，空间插件仍须保留原失败，不能误报成功或自动重做互动。诊断结果也是当轮临时资料，不应记录完整引用或外部正文。

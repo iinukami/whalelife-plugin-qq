@@ -138,5 +138,7 @@ test('current plugin runs unchanged on actual 213b52b host with legacy independe
   assert.equal(modelSend.result.delivery.outcome, 'sent');
   const service = f.app.runtime.services.get('qq')!.value;
   assert.equal(service.qzoneReferenceApiVersion, '1.0.0');
+  assert.equal(service.qzoneVideoApiVersion, '1.0.0');
+  await assert.rejects(service.qzoneReadVideo({ sessionId: id, ref: 'invalid', index: 0 }, { signal: new AbortController().signal }), /动态引用/);
   assert.equal((await service.qzoneReferenceStatus({ sessionId: id, ref: 'invalid' }, { signal: new AbortController().signal })).reason, 'invalid_reference');
 });

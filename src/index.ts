@@ -71,6 +71,12 @@ export async function apply(ctx: Context) {
     qzoneApiVersion: '1.0.0',
     qzoneSocialApiVersion: '1.0.0',
     qzoneReferenceApiVersion: '1.0.0',
+    qzoneVideoApiVersion: '1.0.0',
+    qzoneReadVideo: (input: { sessionId: string; ref: string; index: number }, options: { signal: AbortSignal }) => {
+      ctx.signal.throwIfAborted();
+      if (!runtime) throw new QQError('offline', 'QQ 连接尚未开启。');
+      return runtime.spaceWeb.readVideo(input, options);
+    },
     qzoneReferenceStatus: (input: ReferenceInput, options: { signal: AbortSignal }) => {
       ctx.signal.throwIfAborted(); options.signal.throwIfAborted();
       if (!runtime) return { valid: false, reason: 'offline', message: 'QQ 不在线，请恢复原账号连接后再检查引用。' };

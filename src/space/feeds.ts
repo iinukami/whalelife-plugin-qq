@@ -6,6 +6,7 @@ import { parseFragment, type DefaultTreeAdapterMap } from 'parse5';
 import JSON5 from 'json5';
 import { object, QQError } from '../config.ts';
 import type { PostTarget } from './types.ts';
+import { videoUrl } from './video.ts';
 
 type Node = DefaultTreeAdapterMap['node'];
 const attr = (n: Node, k: string) => 'attrs' in n ? n.attrs.find(a => a.name === k)?.value ?? '' : '';
@@ -109,7 +110,7 @@ export function successful(v: Record<string, unknown>): boolean {
   const codes = [v.code, v.ret, v.subcode].filter(x => x !== undefined);
   return codes.length > 0 && codes.every(x => x === 0 || x === '0');
 }
-export interface ParsedPost extends PostTarget { text: string; images: string[]; hasVideo: boolean; comments: (PostTarget['comments'][number] & { text: string })[] }
+export interface ParsedPost extends PostTarget { text: string; images: string[]; videos: string[]; hasVideo: boolean; comments: (PostTarget['comments'][number] & { text: string })[] }
 /** scope=0 profile response owns friend_data; the other buckets contain activity
  * about the owner and must never be mixed in as the owner's posts. */
 export function parseProfileFeeds(raw: string, accountId: string, count: number, start: number) {
@@ -184,9 +185,19 @@ export function parseFeeds(raw: string, accountId: string, count: number) {
       }))].slice(0, 8);
       const info = list.filter(n => cls(n, 'f-info'));
       const contents = info.length ? info : list.filter(n => cls(n, 'txt-box') || cls(n, 'txt-box-title'));
+      // The platform's native HTML supplies url3 / data-v_vidioswfurl. Never
+      // treat poster, thumbnail, arbitrary links or embedded player URLs as video.
+      const videos = [...new Set(list.flatMap(n => {
+        if (attr(n, 'data-v_source_website')) return [];
+        const candidates = n.nodeName === 'video' ? [attr(n, 'src')]
+          : n.nodeName === 'source' && 'parentNode' in n && n.parentNode?.nodeName === 'video' ? [attr(n, 'src')]
+          : cls(n, 'f-video-wrap') ? (nodes(n).some(c => !!attr(c, 'data-v_source_website')) ? [] : [attr(n, 'url3')])
+          : attr(n, 'data-type') === 'video' ? [attr(n, 'data-v_vidioswfurl'), attr(n, 'data-v_vidiourl')] : [];
+        return candidates.flatMap(raw => { const url = videoUrl(raw); return url ? [url] : []; });
+      }))].slice(0, 8);
       posts.push({ accountId, authorId, tid, kind, interactive, typeId, timestamp: m?.[4] || attr(marker, 'data-abstime'),
-        text: contents.map(n => clean(n)).join('\n').slice(0, 10000), images,
-        hasVideo: list.some(n => n.nodeName === 'video' || /video|vid/.test(attr(n, 'class')) || !!attr(n, 'data-vid')),
+        text: contents.map(n => clean(n)).join('\n').slice(0, 10000), images, videos,
+        hasVideo: videos.length > 0 || list.some(n => n.nodeName === 'video' || /video|vid/.test(attr(n, 'class')) || !!attr(n, 'data-vid')),
         comments });
       seen.add(authorId + '/' + tid);
       if (posts.length >= count) break;
