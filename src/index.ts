@@ -14,7 +14,7 @@ import { replyPlan } from './segmentation.ts';
 import { registerQQTools } from './tools.ts';
 import { InboundMedia } from './inbound-media.ts';
 import type { MediaAction, MediaKey, MediaSendOptions } from './outbound-media.ts';
-import type { PublishPayload, BrowseInput, Interaction } from './space/types.ts';
+import type { PublishPayload, BrowseInput, Interaction, ReferenceInput } from './space/types.ts';
 import { galleryReceiver, apply as legacyGallery, type GalleryService } from './gallery-bridge.ts';
 import { gallerySendingTools } from './gallery-send.ts';
 
@@ -70,6 +70,12 @@ export async function apply(ctx: Context) {
     apiVersion: '1.0.0', status,
     qzoneApiVersion: '1.0.0',
     qzoneSocialApiVersion: '1.0.0',
+    qzoneReferenceApiVersion: '1.0.0',
+    qzoneReferenceStatus: (input: ReferenceInput, options: { signal: AbortSignal }) => {
+      ctx.signal.throwIfAborted(); options.signal.throwIfAborted();
+      if (!runtime) return { valid: false, reason: 'offline', message: 'QQ 不在线，请恢复原账号连接后再检查引用。' };
+      return runtime.spaceWeb.referenceStatus(input, options);
+    },
     qzoneStatus: () => ({ accountId: runtime?.config.accountId || config.accountId || null, online: runtime?.state.state === 'online' }),
     qzonePublish: (input: PublishPayload, options: { signal: AbortSignal }) => {
       ctx.signal.throwIfAborted();

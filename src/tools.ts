@@ -47,7 +47,6 @@ export function registerQQTools(ctx: Context, current: () => QQRuntime | undefin
     }, required: ['userId', 'messageId', 'text'], additionalProperties: false },
     async run(args, session) {
       try {
-        if (session.transientContext) throw new QQError('transient', '本轮含临时外部资料，主动私聊工具暂不支持无正文持久化；QQ 入站最终回复仍可当次交付。');
         // Existing action receipts remain readable while offline; new submissions
         // are rejected with phase evidence by the transport itself.
         const value = runtime(true), input = object(args);
@@ -61,7 +60,7 @@ export function registerQQTools(ctx: Context, current: () => QQRuntime | undefin
           throw new QQError('input', '发送参数无效，须提供明确 QQ 号、稳定 messageId 和非空文字。');
         const userId = account(input.userId);
         const result = await value.sendText({ userId, messageId: `model:${digest([session.id, input.messageId])}`, text: input.text },
-          { sessionId: session.id, signal: session.signal, modelGenerated: true });
+          { sessionId: session.id, signal: session.signal, modelGenerated: true, transient: session.transientContext === true });
         return { ...result, userId, actionId: input.messageId, confirmed: result.status === 'sent', retryAutomatically: false };
       } catch (error) { return failure(error, session); }
     },

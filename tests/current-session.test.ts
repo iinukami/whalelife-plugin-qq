@@ -136,4 +136,7 @@ test('current plugin runs unchanged on actual 213b52b host with legacy independe
   const legacyId = Object.keys(await desktop.app.memory.listSessionMeta())[0];
   assert.ok((await desktop.app.memoryEngine.state(legacyId)).records.some((r: any) => r.source === 'qq' && /自动回复投递结果.*结果未知/.test(r.text)));
   assert.equal(modelSend.result.delivery.outcome, 'sent');
+  const service = f.app.runtime.services.get('qq')!.value;
+  assert.equal(service.qzoneReferenceApiVersion, '1.0.0');
+  assert.equal((await service.qzoneReferenceStatus({ sessionId: id, ref: 'invalid' }, { signal: new AbortController().signal })).reason, 'invalid_reference');
 });

@@ -39,6 +39,9 @@ export class QQRuntime {
   private blockedModelBindings = new Map<string, QQError>();
   private bindingState: { state: 'waiting' | 'ready'; sessionId?: string; error?: string } = { state: 'waiting' };
   private modelSend?: { sessionId: string; peer: string; text: string };
+  // Only the redacted descriptor enters the public channel's durable dedup index.
+  // The original exists solely during this call; a host retry cannot replay it.
+  private transientSend?: { sessionId: string; peer: string; descriptor: string; text: string };
   private inflight = new Set<string>();
   private lastSent = 0;
   private deliveryResults = new Map<string, TextDeliveryReceipt>();
@@ -68,7 +71,15 @@ export class QQRuntime {
     this.media = new MediaReader(ctx, config, this.bot, this.signal);
     this.channel = ctx.channels.register({ id: 'qq', name: 'QQ 私聊', account: config.accountId, persona: config.personaId,
       permission: config.permission, send: (message, { signal }) => {
-        const task = this.sending.then(() => this.deliver(message, AbortSignal.any([signal, this.signal])));
+        const task = this.sending.then(() => {
+          if (message.replyTo === undefined && message.text.startsWith('[QQ 临时私聊；正文不留存；')) {
+            const pending = this.transientSend;
+            if (!pending || pending.sessionId !== message.sessionId || pending.peer !== message.peer || pending.descriptor !== message.text)
+              throw new QQError('transient', '临时私聊正文未保留，不能重试原文；请核对已有投递回执。');
+            message = { ...message, text: pending.text, transient: true };
+          }
+          return this.deliver(message, AbortSignal.any([signal, this.signal]));
+        });
         this.sending = task.catch(() => {}); return task;
       } });
   }
@@ -340,12 +351,14 @@ export class QQRuntime {
         return { userId, nickname: clean(friend?.nickname), remark: clean(friend?.remark), source: 'configured_whitelist' };
       }) };
   }
-  async sendText(input: { userId: string; messageId: string; text: string }, options: { signal?: AbortSignal; sessionId?: string; modelGenerated?: boolean } = {}) {
+  async sendText(input: { userId: string; messageId: string; text: string }, options: { signal?: AbortSignal; sessionId?: string; modelGenerated?: boolean; transient?: boolean } = {}) {
     const signal = AbortSignal.any([this.signal, ...(options.signal ? [options.signal] : [])]);
     signal.throwIfAborted();
     const target = account(input.userId);
     if (!this.config.allowedUsers.includes(target)) throw new QQError('peer', '发送对象不在白名单内。');
     if (typeof input.messageId !== 'string' || !input.messageId || input.messageId.length > 200 || typeof input.text !== 'string') throw new QQError('send', '发送参数无效。');
+    if (input.text.startsWith('[QQ 临时私聊；正文不留存；')) throw new QQError('input', '正文不能使用插件保留的投递摘要格式。');
+    if (options.transient && (!options.modelGenerated || !options.sessionId)) throw new QQError('session', '临时发送缺少可信工具会话。');
     // Direct calls serialize binding + dispatch. A model tool pins its trusted session;
     // ordinary service callers retain the previous follow-Web behavior.
     const task = this.directSending.then(async () => {
@@ -361,8 +374,14 @@ export class QQRuntime {
       }
       signal.throwIfAborted();
       if (options.modelGenerated && options.sessionId) this.modelSend = { sessionId: options.sessionId, peer, text: input.text };
-      try { return await this.describeDelivery(await this.channel.send({ peer, messageId: input.messageId, text: input.text }, { signal })); }
-      finally { this.modelSend = undefined; }
+      const text = options.transient ? `[QQ 临时私聊；正文不留存；指纹 ${digest([this.config.accountId, peer, input.messageId, input.text])}]` : input.text;
+      if (options.transient) this.transientSend = { sessionId: options.sessionId!, peer, descriptor: text, text: input.text };
+      try {
+        const result = await this.describeDelivery(await this.channel.send({ peer, messageId: input.messageId, text }, { signal }));
+        if (!options.transient) return result;
+        const { text: _descriptor, ...receipt } = result;
+        return { ...receipt, transient: true as const };
+      } finally { this.modelSend = undefined; this.transientSend = undefined; }
     });
     this.directSending = task.catch(() => {});
     return task;

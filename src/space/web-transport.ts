@@ -9,11 +9,20 @@ import { account, object, QQError } from '../config.ts';
 import type { OneBot } from '../onebot.ts';
 import { sessionId } from './policy.ts';
 import { imageUrl, parseFeeds, parseProfileFeeds, responseObject, successful, type ParsedPost } from './feeds.ts';
-import type { BrowseInput, BrowseResult, Interaction, PostTarget, SocialTransportReceipt } from './types.ts';
+import type { BrowseInput, BrowseResult, Interaction, PostTarget, SocialTransportReceipt, ReferenceInput, ReferenceStatus, ReferenceFailure } from './types.ts';
 
 type Capability = { sessionId: string; accountId: string; expires: number } & (
   { kind: 'post'; post: PostTarget; images: string[] } | { kind: 'cursor'; value: string; authorId?: string; source?: 'feed' | 'profile' });
 const LIMIT = 4 * 1024 * 1024;
+const referenceMessages: Record<ReferenceFailure, string> = {
+  invalid_reference: '动态引用格式无效，请重新浏览并使用返回的完整引用。',
+  unreadable_reference: '动态引用无法校验，可能来自已重载的连接或内容已损坏；请重新浏览。',
+  offline: 'QQ 不在线，请恢复原账号连接后再检查引用。',
+  account_changed: '动态引用所属 QQ 账号与当前账号不一致，请用当前账号重新浏览。',
+  session_mismatch: '动态引用不属于本会话，请在当前会话重新浏览。',
+  expired: '动态引用已超过有效期，请重新浏览。',
+  wrong_kind: '引用类型不符，动态引用和翻页引用不能混用。',
+};
 /** Parent-only authenticated transport. No files, caches, arbitrary URLs, retries or credentials in results. */
 export class SpaceWebTransport {
   private key = randomBytes(32);
@@ -30,16 +39,41 @@ export class SpaceWebTransport {
     const bytes = Buffer.concat([cipher.update(JSON.stringify(v), 'utf8'), cipher.final()]);
     return Buffer.concat([iv, cipher.getAuthTag(), bytes]).toString('base64url');
   }
-  private open(ref: string, sid: string): Capability {
+  private inspect(input: ReferenceInput): Capability {
+    const fail = (reason: ReferenceFailure): never => { throw new QQError(reason, referenceMessages[reason]); };
+    let sid: string;
+    try { sid = sessionId(input.sessionId); } catch { return fail('invalid_reference'); }
+    if (typeof input.ref !== 'string' || !/^[\w-]{40,65536}$/.test(input.ref)
+      || (input.expectedKind !== undefined && !['post', 'cursor'].includes(input.expectedKind))) return fail('invalid_reference');
+    let v: Capability;
     try {
-      if (typeof ref !== 'string' || !/^[\w-]{40,65536}$/.test(ref)) throw Error();
-      const bytes = Buffer.from(ref, 'base64url'), decipher = createDecipheriv('aes-256-gcm', this.key, bytes.subarray(0, 12));
+      const bytes = Buffer.from(input.ref, 'base64url'), decipher = createDecipheriv('aes-256-gcm', this.key, bytes.subarray(0, 12));
       decipher.setAuthTag(bytes.subarray(12, 28));
-      const v = JSON.parse(Buffer.concat([decipher.update(bytes.subarray(28)), decipher.final()]).toString('utf8')) as Capability;
-      const current = this.identity();
-      if (!current.online || v.accountId !== current.accountId || v.sessionId !== sessionId(sid) || v.expires < Date.now()) throw Error();
-      return v;
-    } catch { throw new QQError('reference', '动态引用已过期、账号已变化或不属于本会话，请重新浏览。'); }
+      v = JSON.parse(Buffer.concat([decipher.update(bytes.subarray(28)), decipher.final()]).toString('utf8')) as Capability;
+    } catch { return fail('unreadable_reference'); }
+    if (!v || !['post', 'cursor'].includes(v.kind) || !Number.isFinite(v.expires)) return fail('invalid_reference');
+    const current = this.identity();
+    if (!current.online) return fail('offline');
+    if (v.accountId !== current.accountId) return fail('account_changed');
+    if (v.sessionId !== sid) return fail('session_mismatch');
+    if (v.expires <= Date.now()) return fail('expired');
+    if (input.expectedKind && v.kind !== input.expectedKind) return fail('wrong_kind');
+    return v;
+  }
+  private open(ref: string, sid: string): Capability {
+    try { return this.inspect({ ref, sessionId: sid }); }
+    // Preserve the existing cross-process error contract for older space plugins.
+    catch { throw new QQError('reference', '动态引用已过期、账号已变化或不属于本会话，请重新浏览。'); }
+  }
+  referenceStatus(input: ReferenceInput, options: { signal: AbortSignal }): ReferenceStatus {
+    this.signal.throwIfAborted(); options.signal.throwIfAborted();
+    try {
+      const v = this.inspect(input);
+      return { valid: true, kind: v.kind, expiresAt: v.expires };
+    } catch (error) {
+      const reason = error instanceof QQError && Object.hasOwn(referenceMessages, error.code) ? error.code as ReferenceFailure : 'invalid_reference';
+      return { valid: false, reason, message: referenceMessages[reason] };
+    }
   }
   resolve(input: { sessionId: string; ref: string }, options: { signal: AbortSignal }): PostTarget {
     this.signal.throwIfAborted(); options.signal.throwIfAborted();
