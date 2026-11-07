@@ -3,7 +3,7 @@
  * Additional terms under AGPLv3 Section 7: see LICENSE-ADDITIONAL.
  */
 import { setTimeout as delay } from 'node:timers/promises';
-import type { Context, ChannelHandle, OutgoingMessage } from 'whalelife';
+import type { Context, ChannelHandle, OutgoingMessage, ToolSession } from 'whalelife';
 import { object, account, id, safeError, QQError, type Config } from './config.ts';
 import { OneBot, type LinkState } from './onebot.ts';
 import { MediaReader } from './media.ts';
@@ -35,7 +35,7 @@ export class QQRuntime {
   private inboundMedia: InboundMedia;
   private outboundMedia: OutboundMedia;
   private mediaActions = 0;
-  private incomingBinding?: { peer: string; sessionId: string };
+  private incomingBinding?: { peer: string; sessionId: string; messageId: string };
   private blockedModelBindings = new Map<string, QQError>();
   private bindingState: { state: 'waiting' | 'ready'; sessionId?: string; error?: string } = { state: 'waiting' };
   private modelSend?: { sessionId: string; peer: string; text: string };
@@ -213,7 +213,7 @@ export class QQRuntime {
       await this.followCurrentSession(event.peer, this.signal, saved.sessionId);
       const sessionId = (await this.channel.context(event.peer)).id;
       this.signal.throwIfAborted();
-      this.incomingBinding = { peer: event.peer, sessionId };
+      this.incomingBinding = { peer: event.peer, sessionId, messageId: event.messageId };
       return sessionId;
     });
     this.directSending = prepare.catch(() => {});
@@ -350,6 +350,17 @@ export class QQRuntime {
         const friend = friends.map(object).find(f => String(f.user_id) === userId);
         return { userId, nickname: clean(friend?.nickname), remark: clean(friend?.remark), source: 'configured_whitelist' };
       }) };
+  }
+  acknowledge(text: string, session: ToolSession) {
+    const incoming = this.incomingBinding;
+    // Bind the early reply to this live inbound turn, never a guessed recipient,
+    // Web selection or a queued/new message in the same shared session.
+    if (!incoming || session.channel !== 'qq' || session.account !== this.config.accountId
+      || session.peer !== incoming.peer || session.id !== incoming.sessionId || session.sender !== incoming.peer.slice(7))
+      throw new QQError('reply_context', '没有匹配的当前 QQ 来信，未发送接话；网页和自主任务不能使用此入口。');
+    return this.sendText({ userId: incoming.peer.slice(7), text,
+      messageId: `ack:${digest([this.config.accountId, incoming.peer, incoming.messageId])}` },
+    { sessionId: incoming.sessionId, signal: session.signal, modelGenerated: true, transient: session.transientContext === true });
   }
   async sendText(input: { userId: string; messageId: string; text: string }, options: { signal?: AbortSignal; sessionId?: string; modelGenerated?: boolean; transient?: boolean } = {}) {
     const signal = AbortSignal.any([this.signal, ...(options.signal ? [options.signal] : [])]);

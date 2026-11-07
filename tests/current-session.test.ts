@@ -119,6 +119,11 @@ test('current plugin runs unchanged on actual 213b52b host with legacy independe
   assert.equal(modelSend.result.status, 'sent'); assert.equal(modelSend.result.sessionId, id);
   assert.equal((await f.app.tools.call('qq_send_message',
     { userId: '200002', messageId: 'legacy-tool', text: '旧宿主模型工具发送' }, { id, permission: 'full' })).result.duplicate, true);
+  let ackRound = 0;
+  f.setGenerate(async () => ++ackRound === 1 ? { text: '', toolCalls: [{ id: 'legacy-ack', name: 'qq_acknowledge', arguments: JSON.stringify({ text: '旧宿主先接话。' }) }] }
+    : { text: '旧宿主处理完成。', toolCalls: [] });
+  f.send({ message_id: 2 }); await sent(f, '2');
+  assert.deepEqual(f.calls.filter(c => c.action === 'send_private_msg').slice(-2).map(c => c.params.message[0].data.text), ['旧宿主先接话。', '旧宿主处理完成。']);
   const desktop = await fixture(t, { hostBoot: boot, config: { connectionMode: 'desktop' }, preparePlugin: desktopConnection });
   await desktop.online(); desktop.send(); await sent(desktop, '1');
   await desktop.app.runtime.action('qq', 'stop'); await until(() => desktop.socket().readyState === 3);
