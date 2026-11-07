@@ -67,7 +67,7 @@ export class OutboundMedia {
     const { ledger } = await this.read(key);
     return ledger ? result(ledger, true) : { status: 'not_found', confirmed: false, retryAutomatically: false, parts: [] };
   }
-  async execute(input: MediaAction, signal: AbortSignal, retry = false) {
+  async execute(input: MediaAction, signal: AbortSignal, retry = false, beforeSend?: () => Promise<void>) {
     signal.throwIfAborted();
     if (this.config.permission !== 'full') throw new QQError('permission', 'QQ 发图未获得完全执行权限，未发送。');
     const { file, deliveryId, userId, ledger: previous } = await this.read(input);
@@ -113,6 +113,7 @@ export class OutboundMedia {
     const ledger: Ledger = previous ?? { version: 1, deliveryId, fingerprint, userId, sessionId: input.sessionId, personaId, plan,
       receipts: plan.map(() => ({ state: 'unattempted' })), status: 'sending' };
     ledger.status = 'sending'; await this.ctx.config.save(file, ledger);
+    await beforeSend?.();
     for (let i = 0; i < plan.length; i++) {
       if (ledger.receipts[i].state === 'sent') continue;
       const part = plan[i];

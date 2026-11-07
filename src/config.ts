@@ -43,6 +43,7 @@ export interface Config {
   mediaHosts: string[];
   segmentedReply: SegmentedReply;
   galleryEnabled: boolean;
+  mergeIncoming: boolean;
 }
 export const defaults: Config = {
   schemaVersion: 3, enabled: false, connectionMode: 'desktop', qqPath: '', wsUrl: '', accessToken: '', accountId: '', allowedUsers: [],
@@ -52,6 +53,7 @@ export const defaults: Config = {
   mediaHosts: [...legacyMediaHosts, 'multimedia.nt.qq.com.cn'],
   segmentedReply: segmentationDefaults,
   galleryEnabled: true,
+  mergeIncoming: true,
 };
 function str(v: unknown, name: string, max = 500): string {
   if (typeof v !== 'string' || v.length > max || /[\u0000-\u001f]/.test(v))
@@ -94,6 +96,8 @@ export function parseConfig(input: unknown): Config {
   const cfg = { ...defaults, enabled: v.enabled };
   if (typeof v.galleryEnabled !== 'boolean') throw new QQError('config', '图库使用开关必须为布尔值。');
   cfg.galleryEnabled = v.galleryEnabled;
+  if (typeof v.mergeIncoming !== 'boolean') throw new QQError('config', '连续来信合并开关必须为布尔值。');
+  cfg.mergeIncoming = v.mergeIncoming;
   cfg.segmentedReply = parseSegmentation(raw.segmentedReply);
   if (!['attach', 'desktop', 'managed', 'external'].includes(v.connectionMode)) throw new QQError('config', '连接方式无效。');
   cfg.connectionMode = v.connectionMode;

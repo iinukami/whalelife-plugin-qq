@@ -3,7 +3,7 @@
  * Additional terms under AGPLv3 Section 7: see LICENSE-ADDITIONAL.
  */
 import { setTimeout as delay } from 'node:timers/promises';
-import type { Context, ChannelHandle, OutgoingMessage, ToolSession } from 'whalelife';
+import type { Context, ChannelHandle, ChannelTurn, OutgoingMessage, ToolSession } from 'whalelife';
 import { object, account, id, safeError, QQError, type Config } from './config.ts';
 import { OneBot, type LinkState } from './onebot.ts';
 import { MediaReader } from './media.ts';
@@ -17,6 +17,9 @@ import type { PublishPayload } from './space/types.ts';
 import { textDeliveryReceipt, unknownDelivery, type Delivery, type TextDeliveryReceipt } from './text-delivery.ts';
 
 interface Inbox { version: 1; fingerprint: string; state: 'preparing' | 'ready' | 'failed'; text?: string; sessionId?: string; }
+type IncomingBinding = { peer: string; sessionId: string; messageId: string };
+type TurnResult = Awaited<ReturnType<ChannelHandle['receive']>>;
+type ActiveTurn = { handle: ChannelTurn; result: Promise<TurnResult> };
 export interface Notice { at: string; messageId?: string; status: string; detail?: string; }
 export class QQRuntime {
   private ctx: Context;
@@ -29,13 +32,17 @@ export class QQRuntime {
   private media: MediaReader;
   private channel: ChannelHandle;
   private tail: Promise<void> = Promise.resolve();
+  private admissions = new Map<string, Promise<void>>();
+  private pending = new Set<Promise<void>>();
+  private turns = new Map<string, ActiveTurn>();
+  private opening = new Map<string, Promise<ActiveTurn>>();
   private sending: Promise<void> = Promise.resolve();
   private directSending: Promise<unknown> = Promise.resolve();
   private bindingSync?: Promise<void>;
   private inboundMedia: InboundMedia;
   private outboundMedia: OutboundMedia;
   private mediaActions = 0;
-  private incomingBinding?: { peer: string; sessionId: string; messageId: string };
+  private incomingBindings = new Map<string, IncomingBinding>();
   private blockedModelBindings = new Map<string, QQError>();
   private bindingState: { state: 'waiting' | 'ready'; sessionId?: string; error?: string } = { state: 'waiting' };
   private modelSend?: { sessionId: string; peer: string; text: string };
@@ -100,7 +107,7 @@ export class QQRuntime {
             const task = this.directSending.then(async () => {
               this.signal.throwIfAborted();
               if (await this.ctx.sessions.current() !== sessionId) return;
-              if (this.incomingBinding) {
+              if (this.incomingBindings.size) {
                 this.bindingState = { state: 'waiting', sessionId, error: '正在处理已固定会话的入站消息，完成后同步。' };
                 return;
               }
@@ -126,7 +133,8 @@ export class QQRuntime {
     signal.throwIfAborted();
     if (!targetSession && typeof this.ctx.sessions.current !== 'function') return;
     const sessionId = targetSession ?? await this.ctx.sessions.current();
-    if (this.incomingBinding?.peer === peer && this.incomingBinding.sessionId !== sessionId)
+    const incoming = this.incomingBindings.get(peer);
+    if (incoming && incoming.sessionId !== sessionId)
       throw new QQError('binding', '该私聊正在处理当前消息，暂不能切换它的会话；本次未发送。');
     const file = `session-binding-${digest([this.config.accountId, peer])}.json`;
     const saved = await this.ctx.config.read<{ version?: number; sessionId?: string }>(file);
@@ -172,14 +180,25 @@ export class QQRuntime {
     if (this.inflight.has(key)) return;
     if (this.inflight.size >= 64) { this.notice('busy', event.messageId, '待处理私聊过多，本条未接收。'); return; }
     this.inflight.add(key);
-    this.tail = this.tail.then(async () => {
+    const merging = this.config.mergeIncoming && typeof this.channel.openTurn === 'function';
+    // Admission must never wait for the model result. Serialize preparation per
+    // peer, including the opening RPC, so arrivals cannot create competing turns.
+    const admission = (merging ? this.admissions.get(event.peer) ?? Promise.resolve() : this.tail).then(async () => {
       this.signal.throwIfAborted();
-      await this.receive(event!);
-    }).catch(error => {
+      return this.receive(event!, merging);
+    });
+    const task = admission.then(value => value.completion).catch(error => {
       if (!this.signal.aborted) this.notice('failed', event!.messageId, safeError(error));
     }).finally(() => { this.inflight.delete(key); });
+    if (merging) {
+      const ready = admission.then(() => {}, () => {});
+      this.admissions.set(event.peer, ready);
+      void ready.then(() => { if (this.admissions.get(event!.peer) === ready) this.admissions.delete(event!.peer); });
+    } else this.tail = task;
+    this.pending.add(task);
+    void task.then(() => this.pending.delete(task));
   }
-  private async receive(event: PrivateEvent) {
+  private async receive(event: PrivateEvent, merging: boolean): Promise<{ completion: Promise<void> }> {
     const file = `inbox-${digest([this.config.accountId, event.peer, event.messageId])}.json`;
     let saved = await this.ctx.config.read<Partial<Inbox>>(file);
     this.signal.throwIfAborted();
@@ -188,15 +207,20 @@ export class QQRuntime {
       throw new QQError('state', '收件会话记录无效，原数据已保留。');
     if (saved.fingerprint && saved.fingerprint !== event.fingerprint) throw new QQError('duplicate_conflict', '同一消息 ID 的内容发生变化，已拒绝处理。');
     if (saved.state === 'preparing' || saved.state === 'failed') {
-      this.notice('uncertain', event.messageId, '这条消息的识别曾中断或失败，未自动重做。请修正配置后以新消息重发。'); return;
+      this.notice('uncertain', event.messageId, '这条消息的识别曾中断或失败，未自动重做。请修正配置后以新消息重发。'); return { completion: Promise.resolve() };
     }
+    let offeredReference = false;
     const normalize = async (sessionId?: string) => {
       saved = { version: 1, fingerprint: event.fingerprint, state: 'preparing', ...(sessionId ? { sessionId } : {}) };
       await this.ctx.config.save(file, saved);
       try {
-        const text = await this.media.normalize(event, sessionId ? (bytes, mime, imageIndex) => this.inboundMedia.offer({
-          sessionId, messageId: event.messageId, imageIndex, mime, base64: bytes.toString('base64'),
-        }, this.signal) : undefined);
+        const text = await this.media.normalize(event, sessionId ? async (bytes, mime, imageIndex) => {
+          const reference = await this.inboundMedia.offer({
+            sessionId, messageId: event.messageId, imageIndex, mime, base64: bytes.toString('base64'),
+          }, this.signal);
+          offeredReference ||= reference.startsWith('[原图引用 ');
+          return reference;
+        } : undefined);
         this.signal.throwIfAborted();
         saved = { ...saved, state: 'ready', text };
         await this.ctx.config.save(file, saved);
@@ -205,6 +229,36 @@ export class QQRuntime {
         throw error;
       }
     };
+    const report = async (value: TurnResult) => {
+      const result = await this.describeDelivery(value);
+      this.notice(result.status, event.messageId, result.delivery.summary);
+    };
+    const active = merging ? this.turns.get(event.peer) : undefined;
+    if (active) {
+      if (!saved.sessionId || saved.sessionId === active.handle.sessionId) {
+        const preparedForAppend = saved.state !== 'ready';
+        if (preparedForAppend) await normalize(active.handle.sessionId);
+        if (typeof saved.text !== 'string') throw new QQError('state', '收件记录不完整，已停止处理。');
+        this.signal.throwIfAborted();
+        const added = await active.handle.append({ peer: event.peer, sender: event.sender, messageId: event.messageId, text: saved.text });
+        if (added.status === 'accepted' || added.status === 'duplicate') {
+          this.notice('merged', event.messageId);
+          return { completion: active.result.then(report) };
+        }
+        if (added.status === 'cancelled') throw new QQError('cancelled', '本轮已取消，这条补充未接纳，不自动重试。');
+        // closed/full explicitly mean not admitted. Wait for delivery and binding
+        // release, then open a fresh turn with this very message (never drop it).
+        this.notice('next_turn', event.messageId);
+        // Rejected text-only additions follow the next current session. Keep
+        // session-bound media references pinned rather than moving their access.
+        if (preparedForAppend && !offeredReference) {
+          delete saved.sessionId;
+          await this.ctx.config.save(file, saved);
+        }
+      }
+      await active.result;
+      this.signal.throwIfAborted();
+    }
     // Preserve the old selection timing when the optional media receiver is absent.
     if (saved.state !== 'ready' && !this.inboundMedia.active()) await normalize();
     // Serialize only route preparation, never the model round: a tool in this round
@@ -213,18 +267,33 @@ export class QQRuntime {
       await this.followCurrentSession(event.peer, this.signal, saved.sessionId);
       const sessionId = (await this.channel.context(event.peer)).id;
       this.signal.throwIfAborted();
-      this.incomingBinding = { peer: event.peer, sessionId, messageId: event.messageId };
       return sessionId;
     });
     this.directSending = prepare.catch(() => {});
     const sessionId = await prepare;
+    const binding = { peer: event.peer, sessionId, messageId: event.messageId };
+    this.incomingBindings.set(event.peer, binding);
+    const release = () => { if (this.incomingBindings.get(event.peer) === binding) this.incomingBindings.delete(event.peer); };
     try {
       if (saved.state !== 'ready') await normalize(sessionId);
       if (typeof saved.text !== 'string') throw new QQError('state', '收件记录不完整，已停止处理。');
       this.signal.throwIfAborted();
-      const result = await this.describeDelivery(await this.channel.receive({ peer: event.peer, sender: event.sender, messageId: event.messageId, text: saved.text }, { signal: this.signal }));
-      this.notice(result.status, event.messageId, result.delivery.summary);
-    } finally { this.incomingBinding = undefined; }
+      const message = { peer: event.peer, sender: event.sender, messageId: event.messageId, text: saved.text };
+      if (!merging) return { completion: this.channel.receive(message, { signal: this.signal }).then(report).finally(release) };
+      const opening = this.channel.openTurn!(message, { signal: this.signal }).then(handle => {
+        const turn: ActiveTurn = { handle, result: handle.result().finally(() => {
+          if (this.turns.get(event.peer) === turn) this.turns.delete(event.peer);
+          release();
+        }) };
+        if (!handle.duplicate) this.turns.set(event.peer, turn);
+        return turn;
+      });
+      this.opening.set(event.peer, opening);
+      let turn: ActiveTurn;
+      try { turn = await opening; }
+      finally { if (this.opening.get(event.peer) === opening) this.opening.delete(event.peer); }
+      return { completion: turn.result.then(report) };
+    } catch (error) { release(); throw error; }
   }
   private async deliver(message: OutgoingMessage, signal: AbortSignal) {
     let ledger: Delivery | undefined, failure: unknown, failed = false;
@@ -352,7 +421,7 @@ export class QQRuntime {
       }) };
   }
   acknowledge(text: string, session: ToolSession) {
-    const incoming = this.incomingBinding;
+    const incoming = this.incomingBindings.get(session.peer ?? '');
     // Bind the early reply to this live inbound turn, never a guessed recipient,
     // Web selection or a queued/new message in the same shared session.
     if (!incoming || session.channel !== 'qq' || session.account !== this.config.accountId
@@ -360,9 +429,13 @@ export class QQRuntime {
       throw new QQError('reply_context', '没有匹配的当前 QQ 来信，未发送接话；网页和自主任务不能使用此入口。');
     return this.sendText({ userId: incoming.peer.slice(7), text,
       messageId: `ack:${digest([this.config.accountId, incoming.peer, incoming.messageId])}` },
-    { sessionId: incoming.sessionId, signal: session.signal, modelGenerated: true, transient: session.transientContext === true });
+    { sessionId: incoming.sessionId, signal: session.signal, modelGenerated: true, transient: session.transientContext === true, acknowledgement: true });
   }
-  async sendText(input: { userId: string; messageId: string; text: string }, options: { signal?: AbortSignal; sessionId?: string; modelGenerated?: boolean; transient?: boolean } = {}) {
+  private async closeReplyInput(peer: string, sessionId?: string) {
+    const turn = this.turns.get(peer) ?? await this.opening.get(peer);
+    if (turn && turn.handle.sessionId === sessionId) await turn.handle.closeInput();
+  }
+  async sendText(input: { userId: string; messageId: string; text: string }, options: { signal?: AbortSignal; sessionId?: string; modelGenerated?: boolean; transient?: boolean; acknowledgement?: boolean } = {}) {
     const signal = AbortSignal.any([this.signal, ...(options.signal ? [options.signal] : [])]);
     signal.throwIfAborted();
     const target = account(input.userId);
@@ -384,6 +457,7 @@ export class QQRuntime {
         throw error;
       }
       signal.throwIfAborted();
+      if (!options.acknowledgement) await this.closeReplyInput(peer, options.sessionId ?? this.incomingBindings.get(peer)?.sessionId);
       if (options.modelGenerated && options.sessionId) this.modelSend = { sessionId: options.sessionId, peer, text: input.text };
       const text = options.transient ? `[QQ 临时私聊；正文不留存；指纹 ${digest([this.config.accountId, peer, input.messageId, input.text])}]` : input.text;
       if (options.transient) this.transientSend = { sessionId: options.sessionId!, peer, descriptor: text, text: input.text };
@@ -402,7 +476,8 @@ export class QQRuntime {
     signal.throwIfAborted();
     if (this.mediaActions >= 2) throw new QQError('busy', '图文发送队列已满，未提交。');
     this.mediaActions++;
-    const task = this.sending.then(() => this.outboundMedia.execute(input, signal, options.retry === true)).finally(() => { this.mediaActions--; });
+    const task = this.sending.then(() => this.outboundMedia.execute(input, signal, options.retry === true,
+      () => this.closeReplyInput(`direct:${input.userId}`, input.sessionId))).finally(() => { this.mediaActions--; });
     this.sending = task.then(() => {}, () => {});
     return task;
   }
@@ -415,12 +490,13 @@ export class QQRuntime {
     try { return await reader.image({ url: 'base64://' + image.base64 }); }
     finally { await reader.dispose(); }
   }
-  status() { return { ...this.state, queued: this.inflight.size + this.mediaActions, recent: this.recent, binding: this.bindingState }; }
+  status() { return { ...this.state, queued: this.inflight.size + this.mediaActions, recent: this.recent, binding: this.bindingState,
+    incomingMerge: { enabled: this.config.mergeIncoming, supported: typeof this.channel.openTurn === 'function' } }; }
   stop(): Promise<void> {
     if (this.stopPromise) return this.stopPromise;
     this.stopped = true; this.controller.abort(); this.bot.stop();
     try { this.channel.dispose(); } catch { /* Host may already have revoked this generation. */ }
-    this.stopPromise = Promise.allSettled([this.tail, this.directSending, this.sending, this.bindingSync, this.media.dispose()]).then(() => {});
+    this.stopPromise = Promise.allSettled([...this.pending, this.tail, this.directSending, this.sending, this.bindingSync, this.media.dispose()]).then(() => {});
     return this.stopPromise;
   }
 }
