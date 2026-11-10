@@ -81,8 +81,8 @@ function validate(input: MiniAppShare, config: Config, options: MiniAppOptions) 
   return { key, fingerprint };
 }
 function signedArk(value: Record<string, unknown>, input: MiniAppShare): string {
-  // The full signed payload is returned by QQ. Validate its identity and target,
-  // then preserve every field, including token/ctime, without editing it.
+  // QQ supplies the signed content. Check identity and target before applying
+  // the Bilibili mobile launch scene; token/ctime and content stay unchanged.
   const ark = object(value.data), config = object(ark.config), detail = object(object(ark.meta).detail_1);
   // QQ may replace the requested applet path with its own signed share link.
   // In that format, qqdocurl carries the video target and desc the card title;
@@ -93,7 +93,12 @@ function signedArk(value: Record<string, unknown>, input: MiniAppShare): string 
     : nativeLink && detail.qqdocurl === input.webUrl && detail.desc === input.title;
   if (ark.app !== 'com.tencent.miniapp_01' || typeof config.token !== 'string' || !config.token || config.token.length > 8192
     || String(detail.appid) !== '1109937557' || !targetMatches) fail('invalid_card');
-  let serialized: string; try { serialized = JSON.stringify(ark); } catch { return fail('invalid_card'); }
+  // Bilibili's Open App control is gated by the launch scene. Native mobile
+  // shares use 1036; the PC signing API returns 0 even when asked for 1036.
+  // This fixed presentation field is not caller-controlled. Do not replace
+  // the signed link, token, title, preview or any other returned content.
+  const mobileArk = { ...ark, meta: { ...object(ark.meta), detail_1: { ...detail, scene: 1036 } } };
+  let serialized: string; try { serialized = JSON.stringify(mobileArk); } catch { return fail('invalid_card'); }
   if (Buffer.byteLength(serialized) > 64 * 1024) fail('invalid_card');
   return serialized;
 }
