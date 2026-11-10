@@ -98,7 +98,7 @@ function receipt(ledger: Ledger, duplicate = false, ledgerSaved = true): MiniApp
     ...(code ? { error: code } : {}) };
 }
 
-/** Called only by QQRuntime's shared outbound queue. No payload is persisted. */
+/** Serialized by QQRuntime's card queue; only submit joins ordinary delivery. */
 export class OutboundMiniApp {
   private ctx: Context;
   private config: Config;
@@ -160,7 +160,8 @@ export class OutboundMiniApp {
       return miniAppFailure(code, code === 'storage' ? 'uncertain' : 'not_sent');
     }
   }
-  async execute(input: MiniAppShare, options: MiniAppOptions, signal: AbortSignal, beforePrepare: () => Promise<void>): Promise<MiniAppReceipt> {
+  async execute(input: MiniAppShare, options: MiniAppOptions, signal: AbortSignal,
+    checkReady: () => Promise<void>, closeInput: () => Promise<void> = async () => {}): Promise<MiniAppReceipt> {
     let ledger: Ledger | undefined, dispatched = false;
     try {
       signal.throwIfAborted();
@@ -175,7 +176,7 @@ export class OutboundMiniApp {
       // final for this action ID; callers must never use receipt lookup as retry.
       ledger = { version: 1, key, fingerprint, state: 'not_sent' };
       await this.save(ledger); signal.throwIfAborted();
-      await beforePrepare(); signal.throwIfAborted();
+      await checkReady(); signal.throwIfAborted();
       let value: Record<string, unknown>;
       try {
         value = await this.prepareArk({ type: 'bili', title: input.title, desc: input.description,
@@ -184,10 +185,14 @@ export class OutboundMiniApp {
       signal.throwIfAborted();
       const ark = signedArk(value, input);
       const platformId = await this.submit(input.userId, ark, signal, async () => {
-        await beforePrepare(); signal.throwIfAborted();
+        await checkReady(); signal.throwIfAborted();
         await this.session(input, signal);
         ledger!.state = 'pending'; await this.save(ledger!); signal.throwIfAborted();
-        await beforePrepare(); signal.throwIfAborted();
+        await checkReady(); signal.throwIfAborted();
+        // Preparation, validation and queueing leave room for supplements.
+        // Seal only once the valid card is about to leave the shared queue.
+        await closeInput(); signal.throwIfAborted();
+        await checkReady(); signal.throwIfAborted();
       }, () => { dispatched = true; });
       let messageId: string;
       try { messageId = id(platformId); if (messageId === '0') fail('uncertain'); } catch { return this.failed(ledger, 'uncertain', true); }

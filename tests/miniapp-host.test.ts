@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { fixture, until } from './fixture.ts';
 import { temporaryDirectory } from './temporary-directory.ts';
+import { segmentationDefaults } from '../src/config.ts';
 
 type Fixture = Awaited<ReturnType<typeof fixture>>;
 const sends = (f: Fixture) => f.calls.filter(c => c.action === 'send_private_msg');
@@ -28,8 +29,8 @@ function installArk(f: Fixture, hook?: (data: any, socket: any) => boolean | Pro
     socket.send(JSON.stringify({ status: 'ok', retcode: 0, echo: data.echo, data: { data: signed() } })); return true;
   });
 }
-async function setup(t: Parameters<typeof fixture>[0], hostBoot?: any) {
-  const f = await fixture(t, { temporaryDirectory, hostBoot, config: { permission: 'full', galleryEnabled: false } });
+async function setup(t: Parameters<typeof fixture>[0], hostBoot?: any, config = {}) {
+  const f = await fixture(t, { temporaryDirectory, hostBoot, config: { permission: 'full', galleryEnabled: false, ...config } });
   await f.online();
   const sessionId = await f.app.sessions.create('synthetic card share session');
   installArk(f);
@@ -184,4 +185,89 @@ test('bounded card queue rejects excess work and cancellation before dispatch le
   controller.abort();
   assert.equal((await pending).status, 'not_sent'); assert.equal((await queued).status, 'sent');
   assert.equal(generations(f).length, 2); assert.equal(sends(f).length, 1);
+});
+
+test('failed card preparation keeps supplements in the same active turn', { timeout: 18000 }, async t => {
+  let release: (() => void) | undefined;
+  t.after(() => release?.());
+  const { f, send } = await setup(t, undefined, { requestTimeoutMs: 10000 });
+  const current = await f.app.sessions.current(); let rounds = 0;
+  installArk(f, (data, socket) => {
+    if (data.action !== 'get_mini_app_ark') return false;
+    release = () => socket.send(JSON.stringify({ status: 'failed', retcode: 1400, echo: data.echo }));
+    return true;
+  });
+  f.setGenerate(async input => {
+    if (++rounds === 1) {
+      assert.equal((await send({ sessionId: current })).status, 'not_sent');
+      return { text: 'STALE_PREPARATION_REPLY', toolCalls: [] };
+    }
+    assert.ok(JSON.stringify(input.messages).includes('LATEST_SUPPLEMENT'));
+    return { text: '按补充回复', toolCalls: [] };
+  });
+  f.send(); await until(() => release);
+  f.send({ message_id: 2, message: [{ type: 'text', data: { text: 'LATEST_SUPPLEMENT' } }] });
+  await until(async () => (await f.status()).recent.some((row: any) => row.messageId === '2' && row.status === 'merged'), 2000);
+  assert.equal(sends(f).length, 0); release!();
+  await until(async () => (await f.status()).queued === 0);
+  assert.equal(rounds, 2);
+  assert.deepEqual(sends(f).map(call => call.params.message[0].data.text), ['按补充回复']);
+  const rows = await f.app.memory.readSession(current);
+  assert.equal(rows.filter((row: any) => row.role === 'assistant').length, 1);
+  assert.equal(rows.filter((row: any) => row.role === 'user').length, 2);
+});
+
+test('slow card preparation does not block ordinary segmented replies without Bilibili installed', { timeout: 18000 }, async t => {
+  let release: (() => void) | undefined;
+  t.after(() => release?.());
+  const { f, send } = await setup(t, undefined, { requestTimeoutMs: 10000,
+    segmentedReply: { ...segmentationDefaults, enabled: true, interval: '0,0' } });
+  assert.equal(f.app.runtime.records.has('bilibili'), false);
+  assert.equal(f.app.runtime.records.has('surf'), false);
+  installArk(f, (data, socket) => {
+    if (data.action !== 'get_mini_app_ark') return false;
+    release = () => socket.send(JSON.stringify({ status: 'ok', retcode: 0, data: { data: signed() }, echo: data.echo }));
+    return true;
+  });
+  const card = send(); await until(() => release);
+  f.setGenerate(async () => ({ text: '第一句。第二句。第三句。', toolCalls: [] }));
+  f.send(); await until(() => sends(f).length === 3, 2000);
+  await until(async () => (await f.status()).recent.some((row: any) => row.status === 'sent'));
+  assert.deepEqual(sends(f).map(call => call.params.message[0].data.text), ['第一句。', '第二句。', '第三句。']);
+  release!(); assert.equal((await card).status, 'sent');
+  assert.deepEqual(sends(f).map(call => call.params.message[0].type), ['text', 'text', 'text', 'json']);
+});
+
+test('ready card waits for the entire segmented delivery and a failed card leaves the queue usable', { timeout: 18000 }, async t => {
+  let releaseText: (() => void) | undefined, releaseCard: (() => void) | undefined;
+  t.after(() => { releaseText?.(); releaseCard?.(); });
+  const { f, send } = await setup(t, undefined, { requestTimeoutMs: 10000,
+    segmentedReply: { ...segmentationDefaults, enabled: true, interval: '0,0' } });
+  const current = await f.app.sessions.current();
+  installArk(f, (data, socket) => {
+    if (data.action === 'get_mini_app_ark') {
+      releaseCard = () => socket.send(JSON.stringify({ status: 'ok', retcode: 0, data: { data: signed() }, echo: data.echo }));
+      return true;
+    }
+    if (data.action === 'send_private_msg' && data.params.message[0].type === 'json') {
+      socket.send(JSON.stringify({ status: 'failed', retcode: 1200, echo: data.echo })); return true;
+    }
+    if (data.action === 'send_private_msg' && !releaseText) {
+      releaseText = () => socket.send(JSON.stringify({ status: 'ok', retcode: 0, data: { message_id: 7777 }, echo: data.echo }));
+      return true;
+    }
+    return false;
+  });
+  const card = send({ sessionId: current }); await until(() => releaseCard);
+  f.setGenerate(async () => ({ text: '甲。乙。丙。', toolCalls: [] }));
+  f.send(); await until(() => releaseText, 2000);
+  releaseCard!();
+  assert.equal(sends(f).length, 1);
+  releaseText!(); assert.equal((await card).status, 'uncertain');
+  assert.deepEqual(sends(f).map(call => call.params.message[0].type), ['text', 'text', 'text', 'json']);
+  f.setGenerate(async () => ({ text: '仍然正常。', toolCalls: [] }));
+  f.send({ message_id: 2 }); await until(() => sends(f).length === 5);
+  assert.equal(sends(f)[4].params.message[0].data.text, '仍然正常。');
+  assert.equal((await send({ sessionId: current })).duplicate, true);
+  assert.equal(sends(f).length, 5);
 });

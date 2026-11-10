@@ -37,7 +37,7 @@ function fixture() {
   });
   const controller = new AbortController(); let service = create();
   return { files, experiences, generated, sent, controller, config,
-    run: (patch: Partial<MiniAppShare> = {}, options: any = { permission: 'full' }, guard = async () => {}) => service.execute({ ...input, ...patch }, options, controller.signal, guard),
+    run: (patch: Partial<MiniAppShare> = {}, options: any = { permission: 'full' }, guard = async () => {}, close = async () => {}) => service.execute({ ...input, ...patch }, options, controller.signal, guard, close),
     status: () => service.status({ userId: input.userId, actionId: input.actionId, sessionId: input.sessionId }, controller.signal),
     reload: () => { service = create(); },
     save: (hook: typeof saveHook) => { saveHook = hook; }, session: (hook: typeof sessionHook) => { sessionHook = hook; },
@@ -144,4 +144,22 @@ test('corrupt ledger is preserved and blocks generation; session/guard changes a
 test('cancel immediately after confirmed receipt does not erase the fact or cause another send', async () => {
   const f = fixture(); f.send(() => { f.controller.abort(); return '9009'; });
   const result = await f.run(); assert.equal(result.status, 'sent'); assert.equal(result.platformMessageId, '9009'); assert.equal(result.confirmed, true);
+});
+
+test('invalid cards and failed persistence leave input open; confirmed delivery seals it only once', async () => {
+  for (const failure of ['signature', 'storage', 'none']) {
+    const f = fixture(); let closed = 0;
+    if (failure === 'signature') f.generate(() => ({ data: {} }));
+    if (failure === 'storage') f.save(value => { if (value.state === 'pending') throw Error('synthetic disk failure'); });
+    const close = async () => {
+      assert.equal(f.generated.length, 1); assert.equal(f.sent.length, 0);
+      assert.ok([...f.files.values()].some((v: any) => v.state === 'pending'));
+      closed++;
+    };
+    const result = await f.run({}, { permission: 'full' }, async () => {}, close);
+    assert.equal(result.status, failure === 'none' ? 'sent' : 'not_sent');
+    assert.equal(closed, failure === 'none' ? 1 : 0);
+    assert.equal((await f.run({}, { permission: 'full' }, async () => {}, close)).duplicate, true);
+    assert.equal(closed, failure === 'none' ? 1 : 0);
+  }
 });
