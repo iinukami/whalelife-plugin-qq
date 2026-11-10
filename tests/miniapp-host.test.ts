@@ -20,7 +20,7 @@ const payload = { userId: '200002', actionId: 'bilibili:host-test', personaId: '
   previewUrl: 'https://i0.hdslb.com/bfs/archive/synthetic-only.jpg', jumpPath: 'pages/video/video?avid=123456',
   webUrl: 'https://www.bilibili.com/video/BV1GJ411x7h7/' };
 const signed = () => ({ app: 'com.tencent.miniapp_01', ver: '1.0.0.0', view: 'miniapp', config: { token: 'synthetic-qq-signed-token', ctime: 1234567890 },
-  meta: { detail_1: { appid: '1109937557', scene: 0, url: payload.jumpPath, title: payload.title, desc: payload.description,
+  meta: { detail_1: { appid: '1109937557', url: payload.jumpPath, title: payload.title, desc: payload.description,
     preview: payload.previewUrl, host: { uin: 100001, nick: 'synthetic-qq-host-identity' } } }, miniappShareOrigin: 3, miniappOpenRefer: '10002' });
 function installArk(f: Fixture, hook?: (data: any, socket: any) => boolean | Promise<boolean>) {
   f.setAction(async (data, socket) => {
@@ -67,8 +67,7 @@ for (const baseline of ['current', '213b52b']) test(`mini-app public service on 
   assert.equal((await send()).duplicate, true);
   assert.equal(generations(f).length, 1); assert.equal(sends(f).length, 1);
   assert.deepEqual(generations(f)[0].params, { type: 'bili', title: payload.title, desc: payload.description, picUrl: payload.previewUrl, jumpUrl: payload.jumpPath, webUrl: payload.webUrl });
-  const mobileCard = signed(); mobileCard.meta.detail_1.scene = 1036;
-  assert.deepEqual(sends(f)[0].params.message, [{ type: 'json', data: { data: JSON.stringify(mobileCard) } }]);
+  assert.deepEqual(sends(f)[0].params.message, [{ type: 'json', data: { data: JSON.stringify(signed()) } }]);
   assert.equal((await send({ title: 'Changed title' })).error, 'conflict'); assert.equal(sends(f).length, 1);
   assert.equal((await status()).status, 'sent');
   if (current) assert.equal(await f.app.sessions.current(), current);

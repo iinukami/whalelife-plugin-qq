@@ -15,7 +15,7 @@ const input: MiniAppShare = { userId: '200002', actionId: 'bilibili:test-1', ses
 function ark() {
   return { app: 'com.tencent.miniapp_01', ver: '1.0.0.0', view: 'view_8C8E89B49BE609866298ADDFF2DBABA4',
     config: { token: 'synthetic-signature-never-store', ctime: 1 },
-    meta: { detail_1: { appid: '1109937557', scene: 1036, url: input.jumpPath, title: input.title, desc: input.description,
+    meta: { detail_1: { appid: '1109937557', url: input.jumpPath, title: input.title, desc: input.description,
       preview: input.previewUrl, host: { uin: 100001, nick: 'synthetic-host-never-store' } } },
     miniappShareOrigin: 3, miniappOpenRefer: '10002' };
 }
@@ -193,22 +193,18 @@ test('native QQ share links preserve the signed payload and validate the video U
   }
 });
 
-test('PC-generated Bilibili cards retain signed content and use the native mobile Open App scene', async () => {
+test('signed card launch scenes and unknown metadata are preserved without rewriting', async () => {
   for (const scene of [0, 1036]) {
-    const f = fixture(), source = nativeArk();
-    source.meta.detail_1.scene = scene;
-    const before = structuredClone(source);
-    f.generate(() => ({ data: source }));
+    const f = fixture();
+    const value = nativeArk();
+    Object.assign(value.meta.detail_1, { scene, futureMetadata: { opaque: 'synthetic-value' } });
+    const original = structuredClone(value);
+    f.generate(() => ({ data: value }));
     assert.equal((await f.run()).status, 'sent');
-    const delivered = JSON.parse(f.sent[0]);
-    // The official Bilibili mini-app enables its QQ Open App control only
-    // for these launch scenes; the PC response's zero does not enable it.
-    assert.ok(['1036', '1069', '2003'].includes(String(delivered.meta.detail_1.scene)));
-    assert.equal(delivered.meta.detail_1.scene, 1036);
-    delivered.meta.detail_1.scene = scene;
-    assert.deepEqual(delivered, before, 'all signed content and unknown fields remain intact');
-    assert.deepEqual(source, before, 'do not mutate the protocol response');
-    f.reload(); assert.equal((await f.run()).duplicate, true);
-    assert.equal(f.sent.length, 1, 'a new presentation does not replay existing delivery');
+    assert.deepEqual(JSON.parse(f.sent[0]), original);
+    assert.deepEqual(value, original);
+    f.reload();
+    assert.equal((await f.run()).duplicate, true);
+    assert.equal(f.sent.length, 1);
   }
 });
