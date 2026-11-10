@@ -11,6 +11,7 @@ import { privateEvent, digest, splitText, type PrivateEvent } from './messages.t
 import { replyPlan } from './segmentation.ts';
 import { InboundMedia } from './inbound-media.ts';
 import { OutboundMedia, type MediaAction, type MediaKey, type MediaSendOptions } from './outbound-media.ts';
+import { OutboundMiniApp, miniAppFailure, type MiniAppShare, type MiniAppKey, type MiniAppOptions } from './outbound-miniapp.ts';
 import { SpaceTransport } from './space/transport.ts';
 import { SpaceWebTransport } from './space/web-transport.ts';
 import type { PublishPayload } from './space/types.ts';
@@ -41,6 +42,8 @@ export class QQRuntime {
   private bindingSync?: Promise<void>;
   private inboundMedia: InboundMedia;
   private outboundMedia: OutboundMedia;
+  private outboundMiniApp: OutboundMiniApp;
+  private miniAppActions = 0;
   private mediaActions = 0;
   private incomingBindings = new Map<string, IncomingBinding>();
   private blockedModelBindings = new Map<string, QQError>();
@@ -75,6 +78,22 @@ export class QQRuntime {
       if (messageId === '0') throw new QQError('uncertain', '协议端未提供有效消息 ID，结果不确定。');
       this.lastSent = Date.now(); return messageId;
     });
+    this.outboundMiniApp = new OutboundMiniApp(ctx, config,
+      (params, signal) => this.bot.request('get_mini_app_ark', params, signal),
+      async (userId, ark, signal, markPending, markDispatched) => {
+        await delay(Math.max(0, this.config.minReplyIntervalMs - (Date.now() - this.lastSent)), undefined, { signal });
+        signal.throwIfAborted();
+        await markPending(); signal.throwIfAborted();
+        if (this.state.state !== 'online') throw new QQError('offline', 'QQ 尚未在线，未发送。', true);
+        markDispatched();
+        const result = await this.bot.request('send_private_msg', {
+          user_id: Number.isSafeInteger(Number(userId)) ? Number(userId) : userId,
+          message: [{ type: 'json', data: { data: ark } }], auto_escape: true,
+        }, signal);
+        const messageId = id(result.message_id);
+        if (messageId === '0') throw new QQError('uncertain', '协议端未提供有效消息 ID，结果不确定。');
+        this.lastSent = Date.now(); return messageId;
+      });
     this.media = new MediaReader(ctx, config, this.bot, this.signal);
     this.channel = ctx.channels.register({ id: 'qq', name: 'QQ 私聊', account: config.accountId, persona: config.personaId,
       permission: config.permission, send: (message, { signal }) => {
@@ -482,6 +501,27 @@ export class QQRuntime {
     return task;
   }
   mediaDelivery(input: MediaKey) { this.signal.throwIfAborted(); return this.outboundMedia.status(input); }
+  sendMiniAppShare(input: MiniAppShare, options: MiniAppOptions) {
+    const signal = AbortSignal.any([this.signal, ...(options?.signal ? [options.signal] : [])]);
+    if (signal.aborted) return Promise.resolve(miniAppFailure('cancelled'));
+    if (this.miniAppActions >= 2) return Promise.resolve(miniAppFailure('busy'));
+    this.miniAppActions++;
+    const guard = async () => {
+      signal.throwIfAborted();
+      if (this.state.state !== 'online') throw new QQError('offline', 'QQ 尚未在线，未发送。', true);
+      const peer = `direct:${input.userId}`;
+      const checkBinding = () => {
+        const incoming = this.incomingBindings.get(peer);
+        if (incoming && incoming.sessionId !== input.sessionId)
+          throw new QQError('binding', '该好友正在处理另一会话，本次未发送。', true);
+      };
+      checkBinding(); await this.closeReplyInput(peer, input.sessionId); signal.throwIfAborted(); checkBinding();
+    };
+    const task = this.sending.then(() => this.outboundMiniApp.execute(input, options, signal, guard))
+      .finally(() => { this.miniAppActions--; });
+    this.sending = task.then(() => {}, () => {}); return task;
+  }
+  miniAppShareDelivery(input: MiniAppKey) { return this.outboundMiniApp.status(input, this.signal); }
   qzonePublish(input: PublishPayload, options: { signal: AbortSignal }) { return this.space.publish(input, options); }
   async qzoneDescribeImage(input: Parameters<SpaceWebTransport['readImage']>[0], options: { signal: AbortSignal }) {
     const signal = AbortSignal.any([this.signal, options.signal]);
@@ -490,7 +530,7 @@ export class QQRuntime {
     try { return await reader.image({ url: 'base64://' + image.base64 }); }
     finally { await reader.dispose(); }
   }
-  status() { return { ...this.state, queued: this.inflight.size + this.mediaActions, recent: this.recent, binding: this.bindingState,
+  status() { return { ...this.state, queued: this.inflight.size + this.mediaActions + this.miniAppActions, recent: this.recent, binding: this.bindingState,
     incomingMerge: { enabled: this.config.mergeIncoming, supported: typeof this.channel.openTurn === 'function' } }; }
   stop(): Promise<void> {
     if (this.stopPromise) return this.stopPromise;

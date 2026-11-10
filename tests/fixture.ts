@@ -14,8 +14,8 @@ export async function until(check: () => unknown | Promise<unknown>, timeout = 7
   while (Date.now() < end) { if (await check()) return; await new Promise(r => setTimeout(r, 15)); }
   throw Error('Condition not reached before deadline');
 }
-export async function fixture(t: TestContext, options: { config?: Partial<Config>; rawConfig?: Record<string, unknown>; proxy?: string; modelTimeout?: number; packagePath?: string; unconfigured?: boolean; preparePlugin?: (root: string) => Promise<void>; prepareHost?: (root: string) => Promise<void>; hostBoot?: typeof boot } = {}) {
-  const root = await temporaryDirectory('whale-qq-plugin-');
+export async function fixture(t: TestContext, options: { config?: Partial<Config>; rawConfig?: Record<string, unknown>; proxy?: string; modelTimeout?: number; packagePath?: string; unconfigured?: boolean; preparePlugin?: (root: string) => Promise<void>; prepareHost?: (root: string) => Promise<void>; hostBoot?: typeof boot; temporaryDirectory?: typeof temporaryDirectory } = {}) {
+  const root = await (options.temporaryDirectory ?? temporaryDirectory)('whale-qq-plugin-');
   let app: Awaited<ReturnType<typeof boot>> | undefined;
   let ws: WebSocket | undefined;
   const calls: any[] = [], generations: any[] = [], modelCalls: any[] = [];

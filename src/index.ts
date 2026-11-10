@@ -14,6 +14,7 @@ import { replyPlan } from './segmentation.ts';
 import { registerQQTools } from './tools.ts';
 import { InboundMedia } from './inbound-media.ts';
 import type { MediaAction, MediaKey, MediaSendOptions } from './outbound-media.ts';
+import { miniAppFailure, type MiniAppShare, type MiniAppKey, type MiniAppOptions } from './outbound-miniapp.ts';
 import type { PublishPayload, BrowseInput, Interaction, ReferenceInput } from './space/types.ts';
 import { galleryReceiver, apply as legacyGallery, type GalleryService } from './gallery-bridge.ts';
 import { gallerySendingTools } from './gallery-send.ts';
@@ -115,6 +116,17 @@ export async function apply(ctx: Context) {
       ctx.signal.throwIfAborted();
       if (!runtime) throw new QQError('offline', 'QQ 连接尚未开启。');
       return runtime.mediaDelivery(input);
+    },
+    miniAppShareApiVersion: '1.0.0',
+    sendMiniAppShare: (input: MiniAppShare, options: MiniAppOptions) => {
+      if (ctx.signal.aborted) return miniAppFailure('cancelled');
+      if (!runtime) return miniAppFailure('offline');
+      return runtime.sendMiniAppShare(input, options);
+    },
+    miniAppShareDelivery: (input: MiniAppKey) => {
+      if (ctx.signal.aborted) return miniAppFailure('cancelled');
+      if (!runtime) return miniAppFailure('offline');
+      return runtime.miniAppShareDelivery(input);
     },
     getSelfId: () => runtime?.config.accountId || config.accountId || null,
     sendText: async (input: { userId: string; messageId: string; text: string }) => {
