@@ -19,6 +19,12 @@ function ark() {
       preview: input.previewUrl, host: { uin: 100001, nick: 'synthetic-host-never-store' } } },
     miniappShareOrigin: 3, miniappOpenRefer: '10002' };
 }
+function nativeArk() {
+  const value = ark();
+  return { ...value, meta: { detail_1: { ...value.meta.detail_1,
+    title: '哔哩哔哩', desc: input.title, qqdocurl: input.webUrl,
+    url: 'm.q.qq.com/a/s/' + 'a'.repeat(32), preview: 'https://qq.ugcimg.cn/v1/synthetic-preview' } } };
+}
 function fixture() {
   const files = new Map<string, unknown>(), experiences: any[] = [], generated: any[] = [], sent: string[] = [];
   let saveHook: ((value: any) => void) | undefined, sessionHook: (() => void) | undefined;
@@ -161,5 +167,28 @@ test('invalid cards and failed persistence leave input open; confirmed delivery 
     assert.equal(closed, failure === 'none' ? 1 : 0);
     assert.equal((await f.run({}, { permission: 'full' }, async () => {}, close)).duplicate, true);
     assert.equal(closed, failure === 'none' ? 1 : 0);
+  }
+});
+
+test('native QQ share links preserve the signed payload and validate the video URL and displayed title', async () => {
+  for (const scheme of ['', 'https://']) {
+    const f = fixture(), value = nativeArk(); value.meta.detail_1.url = scheme + value.meta.detail_1.url;
+    f.generate(() => ({ data: value }));
+    assert.equal((await f.run()).status, 'sent');
+    assert.deepEqual(JSON.parse(f.sent[0]), value);
+    assert.equal((await f.run()).duplicate, true); assert.equal(f.sent.length, 1);
+  }
+  for (const patch of [
+    { qqdocurl: 'https://www.bilibili.com/video/BV17x411w7KC/' }, { qqdocurl: undefined },
+    { qqdocurl: input.webUrl + '?other=1' }, { desc: 'Different video title' },
+    { url: 'https://m.q.qq.com.evil.invalid/a/s/' + 'a'.repeat(32) },
+    { url: 'https://m.q.qq.com/a/s/' + 'a'.repeat(32) + '?redirect=evil' },
+    { url: 'http://m.q.qq.com/a/s/' + 'a'.repeat(32) },
+    { url: 'm.q.qq.com/a/s/not-a-signed-link' },
+    { url: input.jumpPath, qqdocurl: 'https://www.bilibili.com/video/BV17x411w7KC/' },
+  ]) {
+    const f = fixture(), value = nativeArk(); Object.assign(value.meta.detail_1, patch);
+    f.generate(() => ({ data: value }));
+    assert.equal((await f.run()).error, 'invalid_card'); assert.equal(f.sent.length, 0);
   }
 });

@@ -84,8 +84,15 @@ function signedArk(value: Record<string, unknown>, input: MiniAppShare): string 
   // The full signed payload is returned by QQ. Validate its identity and target,
   // then preserve every field, including token/ctime, without editing it.
   const ark = object(value.data), config = object(ark.config), detail = object(object(ark.meta).detail_1);
+  // QQ may replace the requested applet path with its own signed share link.
+  // In that format, qqdocurl carries the video target and desc the card title;
+  // detail.title is the app's display name. Never edit the signed response.
+  const nativeLink = typeof detail.url === 'string' && /^(?:https:\/\/)?m\.q\.qq\.com\/a\/s\/[a-f0-9]{32}$/.test(detail.url);
+  const targetMatches = detail.url === input.jumpPath
+    ? detail.qqdocurl === undefined || detail.qqdocurl === input.webUrl
+    : nativeLink && detail.qqdocurl === input.webUrl && detail.desc === input.title;
   if (ark.app !== 'com.tencent.miniapp_01' || typeof config.token !== 'string' || !config.token || config.token.length > 8192
-    || String(detail.appid) !== '1109937557' || detail.url !== input.jumpPath) fail('invalid_card');
+    || String(detail.appid) !== '1109937557' || !targetMatches) fail('invalid_card');
   let serialized: string; try { serialized = JSON.stringify(ark); } catch { return fail('invalid_card'); }
   if (Buffer.byteLength(serialized) > 64 * 1024) fail('invalid_card');
   return serialized;

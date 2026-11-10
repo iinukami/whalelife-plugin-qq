@@ -40,9 +40,9 @@ type Receipt = {
 
 QQ 将结构化字段映射为 NapCat `get_mini_app_ark({type:'bili', title, desc:description, picUrl:previewUrl, jumpUrl:jumpPath, webUrl})`。该能力通过 QQ 原生 `LightAppSvc.mini_app_share.AdaptShareInfo` 生成签名，要求协议端支持对应动作及 Packet 能力；本仓锁定的 NapCat 4.18.41 提供此接口。缺失时返回 `not_sent`，不通过第三方网站补签名。
 
-仅接受协议成功响应中的完整 ARK 对象，检查 `app === 'com.tencent.miniapp_01'`、非空 `config.token`、`meta.detail_1.appid === '1109937557'` 及 `meta.detail_1.url === jumpPath`，并限制序列化大小为 64 KiB。随后原样序列化整个对象，经 `send_private_msg` 的 `json` 消息段发送；不修改签名字段、标题、时间或额外元数据。普通 `share` 消息段不在此契约内。
+仅接受协议成功响应中的完整 ARK 对象，检查 `app === 'com.tencent.miniapp_01'`、非空 `config.token`、`meta.detail_1.appid === '1109937557'`，并限制序列化大小为 64 KiB。目标校验支持两种 QQ 响应：`meta.detail_1.url` 原样等于 `jumpPath` 时，若有 `qqdocurl`，它必须等于 `webUrl`；0.18.1 起也接受 QQ 生成的 `m.q.qq.com/a/s/<32位小写十六进制>` 分享短链（允许 HTTPS 前缀，无查询或片段），此时必须同时满足 `qqdocurl === webUrl` 和 `desc === title`。原生格式的 `detail_1.title` 是应用名称，`desc` 才是显示的视频标题。随后原样序列化整个对象，经 `send_private_msg` 的 `json` 消息段发送；不改写签名字段、短链、标题、缓存封面、时间或额外元数据。普通 `share` 消息段不在此契约内。
 
-只有明确成功且包含有效非零平台消息 ID 才返回 `sent/confirmed:true`。该回执不证明对端卡片渲染、点击成功或已读。真实跳转及对端显示仍需单独验收；合成协议测试只能证明本地校验、参数映射、发送及防重行为。若协议返回的跳转与请求不完全相同，安全拒绝，不能猜测或改写签名。
+只有明确成功且包含有效非零平台消息 ID 才返回 `sent/confirmed:true`。该回执不证明对端卡片渲染、点击成功或已读。真实跳转及对端显示仍需单独验收；合成协议测试只能证明本地校验、参数映射、发送及防重行为。不能通过任意短链或放宽网页目标校验来接受未知响应，也不猜测或改写签名。
 
 防重键绑定 QQ 账号、会话、好友和动作 ID，内容指纹绑定全部结构化分享字段及人格。持久账本不含这些原始字段，仅保留版本、键摘要、指纹、状态、平台消息 ID 和固定错误码。生成签名前先保存动作占位，投递前再持久化 `pending`；公开存储接口返回的非空记录结构无效或读取抛错时拒绝继续。重启后的 `pending` 视为 `uncertain`，禁止再次发送；同 ID 改内容为 `conflict`。`duplicate:true` 是既有回执，绝不代表又发送一次。
 
