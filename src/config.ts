@@ -43,6 +43,7 @@ export interface Config {
   mediaHosts: string[];
   segmentedReply: SegmentedReply;
   galleryEnabled: boolean;
+  videoShareFormat: 'card' | 'miniapp';
   mergeIncoming: boolean;
 }
 export const defaults: Config = {
@@ -53,6 +54,7 @@ export const defaults: Config = {
   mediaHosts: [...legacyMediaHosts, 'multimedia.nt.qq.com.cn'],
   segmentedReply: segmentationDefaults,
   galleryEnabled: true,
+  videoShareFormat: 'card',
   mergeIncoming: true,
 };
 function str(v: unknown, name: string, max = 500): string {
@@ -96,6 +98,8 @@ export function parseConfig(input: unknown): Config {
   const cfg = { ...defaults, enabled: v.enabled };
   if (typeof v.galleryEnabled !== 'boolean') throw new QQError('config', '图库使用开关必须为布尔值。');
   cfg.galleryEnabled = v.galleryEnabled;
+  if (!['card', 'miniapp'].includes(v.videoShareFormat)) throw new QQError('config', '视频分享方式无效。');
+  cfg.videoShareFormat = v.videoShareFormat;
   if (typeof v.mergeIncoming !== 'boolean') throw new QQError('config', '连续来信合并开关必须为布尔值。');
   cfg.mergeIncoming = v.mergeIncoming;
   cfg.segmentedReply = parseSegmentation(raw.segmentedReply);

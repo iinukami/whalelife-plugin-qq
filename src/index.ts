@@ -117,6 +117,17 @@ export async function apply(ctx: Context) {
       if (!runtime) throw new QQError('offline', 'QQ 连接尚未开启。');
       return runtime.mediaDelivery(input);
     },
+    videoShareApiVersion: '1.0.0',
+    sendVideoShare: (input: MiniAppShare, options: MiniAppOptions) => {
+      if (ctx.signal.aborted) return miniAppFailure('cancelled');
+      if (!runtime) return miniAppFailure('offline');
+      return runtime.sendVideoShare(input, options);
+    },
+    videoShareDelivery: (input: MiniAppKey) => {
+      if (ctx.signal.aborted) return miniAppFailure('cancelled');
+      if (!runtime) return miniAppFailure('offline');
+      return runtime.videoShareDelivery(input);
+    },
     miniAppShareApiVersion: '1.0.0',
     sendMiniAppShare: (input: MiniAppShare, options: MiniAppOptions) => {
       if (ctx.signal.aborted) return miniAppFailure('cancelled');

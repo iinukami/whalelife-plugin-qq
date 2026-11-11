@@ -23,6 +23,7 @@ await build({ entryPoints: ['src/gallery-bridge.ts'], outfile: target + '/sub/ga
 await copyFile('sub/gallery/plugin.yaml', target + '/sub/gallery/plugin.yaml');
 await copyFile('README.md', target + '/README.md');
 await copyFile('MINIAPP-SHARING.md', target + '/MINIAPP-SHARING.md');
+await copyFile('VIDEO-SHARING.md', target + '/VIDEO-SHARING.md');
 for (const file of ['LICENSE', 'LICENSE-ADDITIONAL', 'NOTICE.md', 'THIRD_PARTY_NOTICES.md'])
   await copyFile(file, target + '/' + file);
 await mkdir(target + '/scripts', { recursive: true });

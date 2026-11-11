@@ -27,6 +27,7 @@ export const page = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-
 <details><summary>分段效果预览</summary><label>示例文本<textarea id="segPreviewText">你好！今天过得怎么样？我在这里陪你～</textarea></label><p><button class="secondary" id="segPreview" type="button">预览分段</button></p><p id="segPreviewNotice" role="status"></p><ol id="segPreviewResult" style="white-space:pre-wrap"></ol><small>使用表单中的设置预览，不保存、不调用模型、不发送 QQ 消息。</small></details></section>
 <section class="card"><h2>连续来信</h2><label class="check"><input id="mergeIncoming" type="checkbox">回复前合并同一好友的连续来信</label><p><small id="mergeStatus"></small></p><small>首条立即开始处理，后续补充进入同一轮。提前接话仍可补充；正式文字或图片开始发送后，新消息进入下一轮。图片和语音需先完成识别。</small></section>
 <section class="card"><h2>图库</h2><label id="galleryOptions" class="check"><input id="galleryEnabled" type="checkbox">使用图库收藏与发送图片</label><p><small id="galleryStatus"></small></p></section>
+<section class="card"><label>视频分享方式<select id="videoShareFormat"><option value="card">图文卡（封面＋标题＋链接）</option><option value="miniapp">小程序</option></select><small>小程序分享的部分视频可能无法播放，遇到这种情况可切换为图文卡。</small></label></section>
 <section class="card"><h2>图片与语音理解</h2><div class="grid">
 <label class="wide">看图模型<select id="visionModelId"></select><small>从主干模型配置中选择支持视觉的 OpenAI 兼容模型。图片和动态表情包先识别，再交给会话人格理解。</small></label>
 <label>语音识别方式<select id="speechMode"><option value="platform">协议端语音转写</option><option value="model">使用语音识别模型</option></select></label>
@@ -45,7 +46,7 @@ export const page = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-
 
 export const script = `const byId=id=>document.getElementById(id);let revision='',current={};
 const api=async(path,body)=>{const r=await fetch('/plugins/qq/'+path,{method:body?'POST':'GET',headers:body?{'Content-Type':'application/json'}:{},body:body?JSON.stringify(body):undefined});const v=await r.json();if(!r.ok)throw Error(v.error||'请求失败');return v};
-const fields=['connectionMode','qqPath','wsUrl','accountId','personaId','permission','visionModelId','speechMode','sttModelId','requestTimeoutMs','reconnectMaxMs','minReplyIntervalMs','maxMessageChars','maxMediaBytes','maxMediaItems'];
+const fields=['connectionMode','qqPath','wsUrl','accountId','personaId','permission','videoShareFormat','visionModelId','speechMode','sttModelId','requestTimeoutMs','reconnectMaxMs','minReplyIntervalMs','maxMessageChars','maxMediaBytes','maxMediaItems'];
 function segmentation(){return {enabled:byId('segEnabled').checked,onlyLLMResult:byId('segOnlyLLM').checked,maxLength:Number(byId('segMaxLength').value),regex:byId('segRegex').value,cleanupRegex:byId('segCleanupRegex').value,intervalMethod:byId('segIntervalMethod').value,interval:byId('segInterval').value,logBase:Number(byId('segLogBase').value)}}
 function segmentationMode(){byId('segOptions').hidden=!byId('segEnabled').checked;byId('segIntervalLabel').hidden=byId('segIntervalMethod').value!=='random';byId('segLogLabel').hidden=byId('segIntervalMethod').value!=='log'}
 function loadSegmentation(v){byId('segEnabled').checked=v.enabled;byId('segOnlyLLM').checked=v.onlyLLMResult;for(const [id,key] of [['segMaxLength','maxLength'],['segRegex','regex'],['segCleanupRegex','cleanupRegex'],['segIntervalMethod','intervalMethod'],['segInterval','interval'],['segLogBase','logBase']])byId(id).value=v[key];segmentationMode()}

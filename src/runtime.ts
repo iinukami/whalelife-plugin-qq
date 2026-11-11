@@ -12,6 +12,7 @@ import { replyPlan } from './segmentation.ts';
 import { InboundMedia } from './inbound-media.ts';
 import { OutboundMedia, type MediaAction, type MediaKey, type MediaSendOptions } from './outbound-media.ts';
 import { OutboundMiniApp, miniAppFailure, type MiniAppShare, type MiniAppKey, type MiniAppOptions } from './outbound-miniapp.ts';
+import { prepareVideoCard, type ShareMessage } from './video-share.ts';
 import { SpaceTransport } from './space/transport.ts';
 import { SpaceWebTransport } from './space/web-transport.ts';
 import type { PublishPayload } from './space/types.ts';
@@ -79,9 +80,8 @@ export class QQRuntime {
       if (messageId === '0') throw new QQError('uncertain', '协议端未提供有效消息 ID，结果不确定。');
       this.lastSent = Date.now(); return messageId;
     });
-    this.outboundMiniApp = new OutboundMiniApp(ctx, config,
-      (params, signal) => this.bot.request('get_mini_app_ark', params, signal),
-      (userId, ark, signal, markPending, markDispatched) => {
+    const submitShare = (userId: string, message: ShareMessage, signal: AbortSignal,
+      markPending: () => Promise<void>, markDispatched: () => void) => {
         // Signing must not occupy the ordinary delivery queue. Only a ready
         // card joins it, preserving whole segmented replies and rate limits.
         const task = this.sending.then(async () => {
@@ -92,14 +92,18 @@ export class QQRuntime {
           markDispatched();
           const result = await this.bot.request('send_private_msg', {
             user_id: Number.isSafeInteger(Number(userId)) ? Number(userId) : userId,
-            message: [{ type: 'json', data: { data: ark } }], auto_escape: true,
+            message, auto_escape: true,
           }, signal);
           const messageId = id(result.message_id);
           if (messageId === '0') throw new QQError('uncertain', '协议端未提供有效消息 ID，结果不确定。');
           this.lastSent = Date.now(); return messageId;
         });
         this.sending = task.then(() => {}, () => {}); return task;
-      });
+      };
+    this.outboundMiniApp = new OutboundMiniApp(ctx, config,
+      (params, signal) => this.bot.request('get_mini_app_ark', params, signal),
+      (userId, ark, signal, pending, dispatched) => submitShare(userId, [{ type: 'json', data: { data: ark } }], signal, pending, dispatched),
+      { prepare: (input, signal) => prepareVideoCard(input, config, signal), submit: submitShare });
     this.media = new MediaReader(ctx, config, this.bot, this.signal);
     this.channel = ctx.channels.register({ id: 'qq', name: 'QQ 私聊', account: config.accountId, persona: config.personaId,
       permission: config.permission, send: (message, { signal }) => {
@@ -507,7 +511,10 @@ export class QQRuntime {
     return task;
   }
   mediaDelivery(input: MediaKey) { this.signal.throwIfAborted(); return this.outboundMedia.status(input); }
-  sendMiniAppShare(input: MiniAppShare, options: MiniAppOptions) {
+  sendMiniAppShare(input: MiniAppShare, options: MiniAppOptions) { return this.sendShare(input, options, false); }
+  sendVideoShare(input: MiniAppShare, options: MiniAppOptions) { return this.sendShare(input, options, true); }
+  private sendShare(input: MiniAppShare, options: MiniAppOptions, followSelection: boolean) {
+    const format = followSelection ? this.config.videoShareFormat : 'miniapp';
     const signal = AbortSignal.any([this.signal, ...(options?.signal ? [options.signal] : [])]);
     if (signal.aborted) return Promise.resolve(miniAppFailure('cancelled'));
     if (this.miniAppActions >= 2) return Promise.resolve(miniAppFailure('busy'));
@@ -521,11 +528,12 @@ export class QQRuntime {
         throw new QQError('binding', '该好友正在处理另一会话，本次未发送。', true);
     };
     const task = this.miniAppSending.then(() => this.outboundMiniApp.execute(input, options, signal, guard,
-      () => this.closeReplyInput(`direct:${input.userId}`, input.sessionId)))
+      () => this.closeReplyInput(`direct:${input.userId}`, input.sessionId), format, followSelection))
       .finally(() => { this.miniAppActions--; });
     this.miniAppSending = task.then(() => {}, () => {}); return task;
   }
   miniAppShareDelivery(input: MiniAppKey) { return this.outboundMiniApp.status(input, this.signal); }
+  videoShareDelivery(input: MiniAppKey) { return this.outboundMiniApp.status(input, this.signal, true); }
   qzonePublish(input: PublishPayload, options: { signal: AbortSignal }) { return this.space.publish(input, options); }
   async qzoneDescribeImage(input: Parameters<SpaceWebTransport['readImage']>[0], options: { signal: AbortSignal }) {
     const signal = AbortSignal.any([this.signal, options.signal]);

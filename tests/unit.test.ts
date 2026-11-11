@@ -15,6 +15,21 @@ test('configuration is offline by default, validates credentials/identity and mi
   assert.equal(migrated.schemaVersion, 3); assert.equal(migrated.connectionMode, 'external'); assert.equal(migrated.accountId, '100001'); assert.equal(migrated.accessToken, 'SECRET');
   assert.ok(!JSON.stringify(publicConfig(migrated)).includes('SECRET'));
 });
+test('video share format defaults to cards for old configs and accepts only explicit supported formats', () => {
+  assert.equal(defaults.videoShareFormat, 'card');
+  for (const raw of [{}, { schemaVersion: 0 }, { schemaVersion: 1 }, { schemaVersion: 2 }, { schemaVersion: 3 }])
+    assert.equal(parseConfig(raw).videoShareFormat, 'card');
+  for (const videoShareFormat of ['card', 'miniapp'] as const) {
+    const parsed = parseConfig({ videoShareFormat, unknownSetting: 'ignored', accessToken: 'SECRET' });
+    assert.equal(parsed.videoShareFormat, videoShareFormat);
+    assert.equal(publicConfig(parsed).videoShareFormat, videoShareFormat);
+    assert.equal('unknownSetting' in parsed, false);
+    assert.equal('accessToken' in publicConfig(parsed), false);
+  }
+  for (const videoShareFormat of [undefined, null, '', 'CARD', ' miniapp', 'auto', true, 1, [], {}])
+    assert.throws(() => parseConfig({ videoShareFormat }), /视频分享方式无效/);
+});
+
 test('only explicit trusted routing fields survive; groups/temp/self/wrong accounts are ignored', () => {
   const parsed = privateEvent({ ...event, persona: 'evil', permission: 'full', sessionId: 'victim', origin: { plugin: 'core' } }, config)!;
   assert.equal(parsed.peer, 'direct:200002'); assert.equal(parsed.messageId, '-12');

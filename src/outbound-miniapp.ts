@@ -5,6 +5,7 @@
 import type { Context } from 'whalelife';
 import { account, id, object, QQError, type Config } from './config.ts';
 import { digest } from './messages.ts';
+import type { VideoShareFormat, PreparedVideoCard, ShareMessage } from './video-share.ts';
 
 export interface MiniAppKey { userId: string; actionId: string; sessionId: string; }
 export interface MiniAppShare extends MiniAppKey {
@@ -27,9 +28,16 @@ export interface MiniAppReceipt {
   retryAutomatically: false; canRetry: false; platformMessageId?: string; ledgerSaved?: boolean;
   error?: ErrorCode;
 }
+export type VideoShareReceipt = MiniAppReceipt & { format?: VideoShareFormat; coverIncluded?: boolean };
+export interface CardDelivery {
+  prepare: (input: MiniAppShare, signal: AbortSignal) => Promise<PreparedVideoCard>;
+  submit: (userId: string, message: ShareMessage, signal: AbortSignal,
+    pending: () => Promise<void>, dispatched: () => void) => Promise<string>;
+}
 type Ledger = {
   version: 1; key: string; fingerprint: string; state: 'not_sent' | 'pending' | 'uncertain' | 'sent';
   platformMessageId?: string; error?: ErrorCode;
+  format?: 'card'; coverIncluded?: boolean;
 };
 type Submit = (userId: string, ark: string, signal: AbortSignal,
   pending: () => Promise<void>, dispatched: () => void) => Promise<string>;
@@ -65,7 +73,7 @@ function shareKey(input: MiniAppKey, config: Config) {
   if (!config.allowedUsers.includes(userId) || userId === config.accountId) fail('recipient');
   return digest([config.accountId, input.sessionId, userId, input.actionId]);
 }
-function validate(input: MiniAppShare, config: Config, options: MiniAppOptions) {
+function validate(input: MiniAppShare, config: Config, options: MiniAppOptions, format: VideoShareFormat) {
   keys(input, ['userId', 'actionId', 'sessionId', 'personaId', 'preset', 'title', 'description', 'previewUrl', 'jumpPath', 'webUrl']);
   keys(options, ['permission', 'signal']);
   if (options.permission !== 'full' || config.permission !== 'full') fail('permission');
@@ -73,8 +81,10 @@ function validate(input: MiniAppShare, config: Config, options: MiniAppOptions) 
   if (input.personaId !== undefined) text(input.personaId, 200);
   if (input.preset !== 'bili') fail('invalid_input');
   text(input.title, 200); text(input.description, 500, true);
-  const preview = https(input.previewUrl), web = https(input.webUrl);
-  if (!(preview.hostname === 'hdslb.com' || preview.hostname.endsWith('.hdslb.com'))
+  if (format !== 'miniapp' && format !== 'card') fail('invalid_input');
+  text(input.previewUrl, 2048, format === 'card');
+  const preview = input.previewUrl ? https(input.previewUrl) : undefined, web = https(input.webUrl);
+  if ((preview && !(preview.hostname === 'hdslb.com' || preview.hostname.endsWith('.hdslb.com')))
     || web.hostname !== 'www.bilibili.com' || web.search || !/^\/video\/BV[1-9A-HJ-NP-Za-km-z]{10}\/$/.test(web.pathname)
     || typeof input.jumpPath !== 'string' || !/^pages\/video\/video\?avid=[1-9]\d{0,19}$/.test(input.jumpPath)) fail('invalid_input');
   const fingerprint = digest([input.personaId ?? '', input.preset, input.title, input.description, input.previewUrl, input.jumpPath, input.webUrl]);
@@ -97,12 +107,14 @@ function signedArk(value: Record<string, unknown>, input: MiniAppShare): string 
   if (Buffer.byteLength(serialized) > 64 * 1024) fail('invalid_card');
   return serialized;
 }
-function receipt(ledger: Ledger, duplicate = false, ledgerSaved = true): MiniAppReceipt {
+function receipt(ledger: Ledger, duplicate = false, ledgerSaved = true, includeFormat = false): VideoShareReceipt {
   const status = ledger.state === 'pending' ? 'uncertain' : ledger.state;
   const code = ledger.error ?? (status === 'uncertain' ? 'uncertain' : undefined);
   return { status, confirmed: status === 'sent', duplicate, retryAutomatically: false, canRetry: false, ledgerSaved,
     ...(ledger.platformMessageId ? { platformMessageId: ledger.platformMessageId } : {}),
-    ...(code ? { error: code } : {}) };
+    ...(code ? { error: code } : {}),
+    ...(includeFormat ? { format: ledger.format ?? 'miniapp',
+      ...(ledger.coverIncluded === undefined ? {} : { coverIncluded: ledger.coverIncluded }) } : {}) };
 }
 
 /** Serialized by QQRuntime's card queue; only submit joins ordinary delivery. */
@@ -111,9 +123,10 @@ export class OutboundMiniApp {
   private config: Config;
   private prepareArk: PrepareArk;
   private submit: Submit;
+  private card?: CardDelivery;
   private cache = new Map<string, { ledger: Ledger; saved: boolean }>();
-  constructor(ctx: Context, config: Config, prepareArk: PrepareArk, submit: Submit) {
-    this.ctx = ctx; this.config = config; this.prepareArk = prepareArk; this.submit = submit;
+  constructor(ctx: Context, config: Config, prepareArk: PrepareArk, submit: Submit, card?: CardDelivery) {
+    this.ctx = ctx; this.config = config; this.prepareArk = prepareArk; this.submit = submit; this.card = card;
   }
   private remember(ledger: Ledger, saved: boolean) {
     this.cache.set(ledger.key, { ledger, saved });
@@ -128,10 +141,13 @@ export class OutboundMiniApp {
       raw = value as Record<string, unknown>;
     } catch { return fail('storage'); }
     if (!Object.keys(raw).length) return undefined;
-    const allowed = ['version', 'key', 'fingerprint', 'state', 'platformMessageId', 'error'];
+    const allowed = ['version', 'key', 'fingerprint', 'state', 'platformMessageId', 'error', 'format', 'coverIncluded'];
     if (Object.keys(raw).some(k => !allowed.includes(k)) || raw.version !== 1 || raw.key !== key || typeof raw.fingerprint !== 'string' || !hash.test(raw.fingerprint)
       || !['not_sent', 'pending', 'uncertain', 'sent'].includes(String(raw.state))
-      || (raw.error !== undefined && !Object.hasOwn(messages, String(raw.error)))) fail('storage');
+      || (raw.error !== undefined && !Object.hasOwn(messages, String(raw.error)))
+      || (raw.format !== undefined && raw.format !== 'card')
+      || (raw.coverIncluded !== undefined && (raw.format !== 'card' || typeof raw.coverIncluded !== 'boolean'))
+      || (raw.format === 'card' && raw.state === 'sent' && typeof raw.coverIncluded !== 'boolean')) fail('storage');
     if (raw.state === 'sent') {
       try { if (typeof raw.platformMessageId !== 'string' || id(raw.platformMessageId) === '0') fail('storage'); } catch { return fail('storage'); }
     } else if (raw.platformMessageId !== undefined) fail('storage');
@@ -155,12 +171,13 @@ export class OutboundMiniApp {
     } catch { return fail('session'); }
     signal.throwIfAborted();
   }
-  async status(input: MiniAppKey, signal: AbortSignal): Promise<MiniAppReceipt> {
+  async status(input: MiniAppKey, signal: AbortSignal, includeFormat = false): Promise<VideoShareReceipt> {
     try {
       keys(input, ['userId', 'actionId', 'sessionId']);
       const key = shareKey(input, this.config); await this.session(input, signal);
       const found = await this.read(key); signal.throwIfAborted();
-      return found ? receipt(found.ledger, true, found.saved)
+      if (found?.ledger.format === 'card' && !includeFormat) fail('conflict');
+      return found ? receipt(found.ledger, true, found.saved, includeFormat)
         : { status: 'not_found', confirmed: false, duplicate: false, retryAutomatically: false, canRetry: false };
     } catch (error) {
       const code = failureCode(error, 'storage', signal);
@@ -168,30 +185,40 @@ export class OutboundMiniApp {
     }
   }
   async execute(input: MiniAppShare, options: MiniAppOptions, signal: AbortSignal,
-    checkReady: () => Promise<void>, closeInput: () => Promise<void> = async () => {}): Promise<MiniAppReceipt> {
+    checkReady: () => Promise<void>, closeInput: () => Promise<void> = async () => {},
+    format: VideoShareFormat = 'miniapp', includeFormat = false): Promise<VideoShareReceipt> {
     let ledger: Ledger | undefined, dispatched = false;
     try {
       signal.throwIfAborted();
-      const { key, fingerprint } = validate(input, this.config, options);
+      const { key, fingerprint } = validate(input, this.config, options, format);
       await this.session(input, signal);
       const previous = await this.read(key); signal.throwIfAborted();
       if (previous) {
-        if (previous.ledger.fingerprint !== fingerprint) fail('conflict');
-        return receipt(previous.ledger, true, previous.saved);
+        if (previous.ledger.fingerprint !== fingerprint || (previous.ledger.format ?? 'miniapp') !== format) fail('conflict');
+        return receipt(previous.ledger, true, previous.saved, includeFormat);
       }
       // Reserve the operation before any protocol call. Even a signing failure is
       // final for this action ID; callers must never use receipt lookup as retry.
-      ledger = { version: 1, key, fingerprint, state: 'not_sent' };
+      ledger = { version: 1, key, fingerprint, state: 'not_sent', ...(format === 'card' ? { format } : {}) };
       await this.save(ledger); signal.throwIfAborted();
       await checkReady(); signal.throwIfAborted();
-      let value: Record<string, unknown>;
-      try {
-        value = await this.prepareArk({ type: 'bili', title: input.title, desc: input.description,
-          picUrl: input.previewUrl, jumpUrl: input.jumpPath, webUrl: input.webUrl }, signal);
-      } catch (error) { throw new QQError(failureCode(error, 'unsupported', signal), messages.unsupported); }
-      signal.throwIfAborted();
-      const ark = signedArk(value, input);
-      const platformId = await this.submit(input.userId, ark, signal, async () => {
+      let send: (pending: () => Promise<void>, dispatched: () => void) => Promise<string>;
+      if (format === 'card') {
+        if (!this.card) fail('unsupported');
+        const card = await this.card.prepare(input, signal); signal.throwIfAborted();
+        ledger.coverIncluded = card.coverIncluded;
+        send = (pending, dispatched) => this.card!.submit(input.userId, card.message, signal, pending, dispatched);
+      } else {
+        let value: Record<string, unknown>;
+        try {
+          value = await this.prepareArk({ type: 'bili', title: input.title, desc: input.description,
+            picUrl: input.previewUrl, jumpUrl: input.jumpPath, webUrl: input.webUrl }, signal);
+        } catch (error) { throw new QQError(failureCode(error, 'unsupported', signal), messages.unsupported); }
+        signal.throwIfAborted();
+        const ark = signedArk(value, input);
+        send = (pending, dispatched) => this.submit(input.userId, ark, signal, pending, dispatched);
+      }
+      const platformId = await send(async () => {
         await checkReady(); signal.throwIfAborted();
         await this.session(input, signal);
         ledger!.state = 'pending'; await this.save(ledger!); signal.throwIfAborted();
@@ -202,28 +229,30 @@ export class OutboundMiniApp {
         await checkReady(); signal.throwIfAborted();
       }, () => { dispatched = true; });
       let messageId: string;
-      try { messageId = id(platformId); if (messageId === '0') fail('uncertain'); } catch { return this.failed(ledger, 'uncertain', true); }
+      try { messageId = id(platformId); if (messageId === '0') fail('uncertain'); } catch { return this.failed(ledger, 'uncertain', true, includeFormat); }
       // A confirmed external action is irreversible. Cancellation/persistence
       // failures afterwards cannot turn it into a claimed failed send.
       ledger.state = 'sent'; ledger.platformMessageId = messageId; delete ledger.error;
       let saved = true; try { await this.save(ledger); } catch { saved = false; }
       try {
         await this.ctx.memory.recordExperience(input.sessionId, { event_id: `qq-miniapp:${key}`, outcome: 'succeeded',
-          text: '已通过 QQ 私聊发送一张 B 站视频小程序卡片。', origin: { platform: 'QQ 私聊', action: '分享小程序卡片' } });
+          text: format === 'card' ? '已通过 QQ 私聊分享一个 B 站视频链接。' : '已通过 QQ 私聊发送一张 B 站视频小程序卡片。',
+          origin: { platform: 'QQ 私聊', action: format === 'card' ? '分享视频链接' : '分享小程序卡片' } });
       } catch { /* Fixed success fact is best effort; never resend for memory. */ }
-      const result = receipt(ledger, false, saved);
+      const result = receipt(ledger, false, saved, includeFormat);
       if (!saved) result.error = 'storage';
       return result;
     } catch (error) {
       const uncertain = dispatched && !(error instanceof QQError && error.notSent);
       const code = uncertain ? 'uncertain' : failureCode(error, 'invalid_input', signal);
-      if (!ledger) return miniAppFailure(code, uncertain || code === 'storage' ? 'uncertain' : 'not_sent');
-      return this.failed(ledger, code, uncertain);
+      if (!ledger) return { ...miniAppFailure(code, uncertain || code === 'storage' ? 'uncertain' : 'not_sent'),
+        ...(includeFormat ? { format } : {}) };
+      return this.failed(ledger, code, uncertain, includeFormat);
     }
   }
-  private async failed(ledger: Ledger, code: ErrorCode, uncertain: boolean) {
+  private async failed(ledger: Ledger, code: ErrorCode, uncertain: boolean, includeFormat = false) {
     ledger.state = uncertain ? 'uncertain' : 'not_sent'; ledger.error = code;
     let saved = true; try { await this.save(ledger); } catch { saved = false; }
-    return receipt(ledger, false, saved);
+    return receipt(ledger, false, saved, includeFormat);
   }
 }
