@@ -14,7 +14,7 @@ export async function until(check: () => unknown | Promise<unknown>, timeout = 7
   while (Date.now() < end) { if (await check()) return; await new Promise(r => setTimeout(r, 15)); }
   throw Error('Condition not reached before deadline');
 }
-export async function fixture(t: TestContext, options: { config?: Partial<Config>; rawConfig?: Record<string, unknown>; proxy?: string; modelTimeout?: number; packagePath?: string; unconfigured?: boolean; preparePlugin?: (root: string) => Promise<void>; prepareHost?: (root: string) => Promise<void>; hostBoot?: typeof boot; temporaryDirectory?: typeof temporaryDirectory } = {}) {
+export async function fixture(t: TestContext, options: { config?: Partial<Config>; rawConfig?: Record<string, unknown>; proxy?: string; modelTimeout?: number; packagePath?: string; includeQzone?: boolean; includeVendor?: boolean; unconfigured?: boolean; preparePlugin?: (root: string) => Promise<void>; prepareHost?: (root: string) => Promise<void>; hostBoot?: typeof boot; temporaryDirectory?: typeof temporaryDirectory } = {}) {
   const root = await (options.temporaryDirectory ?? temporaryDirectory)('whale-qq-plugin-');
   let app: Awaited<ReturnType<typeof boot>> | undefined;
   let ws: WebSocket | undefined;
@@ -60,9 +60,9 @@ export async function fixture(t: TestContext, options: { config?: Partial<Config
     });
   });
   await mkdir(join(root, 'config'), { recursive: true });
-  await cp(options.packagePath ?? fileURLToPath(new URL('../dist/qq', import.meta.url)), join(root, 'plugins/qq'), { recursive: true, filter: source => !source.replaceAll('\\', '/').includes('/vendor/') && !source.replaceAll('\\', '/').endsWith('/vendor') });
+  await cp(options.packagePath ?? fileURLToPath(new URL('../dist/qq', import.meta.url)), join(root, 'plugins/qq'), { recursive: true, filter: source => options.includeVendor === true || (!source.replaceAll('\\', '/').includes('/vendor/') && !source.replaceAll('\\', '/').endsWith('/vendor')) });
   const spaceBuild = fileURLToPath(new URL('../../whalelife-plugin-qzone/dist/qzone', import.meta.url));
-  if (await access(spaceBuild).then(() => true, () => false)) await cp(spaceBuild, join(root, 'plugins/qq/sub/qzone'), { recursive: true });
+  if (options.includeQzone !== false && await access(spaceBuild).then(() => true, () => false)) await cp(spaceBuild, join(root, 'plugins/qq/sub/qzone'), { recursive: true });
   await mkdir(join(root, 'plugins/qq/data'));
   const config = { ...defaults, connectionMode: 'external', enabled: true, wsUrl, accessToken: 'fake-onebot-secret', accountId: '100001',
     allowedUsers: ['200002'], personaId: 'a', visionModelId: 'vision', sttModelId: 'stt',

@@ -20,8 +20,10 @@ Sharp 的原生包还包含 libvips 等组件，涉及 LGPL-3.0-or-later 等许�
 ## QQ 运行组件
 
 - **NapCatQQ / NapCatQQ Framework 4.18.41**：采用上游自定义
-  [Limited Redistribution License](https://github.com/NapNeko/NapCatQQ/blob/v4.18.41/LICENSE)，
-  包含禁止商业用途及再分发条件。仓库只提供原创桥接源码与下载准备脚本，不包含 NapCat 二进制。
+  [Limited Redistribution License](third-party/napcat/LICENSE)，
+  包含禁止商业用途及再分发条件。源码仓库只提供原创桥接源码、离线准备脚本及原许可，不包含 NapCat 二进制。
+  原始来源为 `NapNeko/NapCatQQ` 的 `v4.18.41`，上游已撤下该版本；两个原包保持原始字节，固定摘要分别记录在 `engine.lock.json` 与 `desktop-engine.lock.json`。
+  桌面发行包原样携带这些组件，并保留其许可证、版权及来源说明；组件不得使用本仓库的 AGPL 重新授权。
   **本插件采用 AGPL 并不使 NapCat 获得商业使用授权**；使用、打包或商业部署必须分别满足上游条件，必要时取得额外授权。
 - **Frida 17.24.0**：包声明为 `LGPL-2.0 WITH WxWindows-exception-3.1`。
   接入说明及已有许可副本见 [attach/THIRD-PARTY.md](attach/THIRD-PARTY.md)

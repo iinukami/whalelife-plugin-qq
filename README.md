@@ -53,16 +53,31 @@ QQ 只在内存中读取经账号、会话、有效期校验的空间原生视�
 
 此接口只反映查询当下的引用状态，不能倒推历史失败原因；若返回有效，空间插件仍须保留原失败，不能误报成功或自动重做互动。诊断结果也是当轮临时资料，不应记录完整引用或外部正文。
 
-QQ 源码仓库不上传 NapCat、QQ 客户端、Frida 原生二进制或个人登录资料。桌面组件按锁定版本从上游下载并校验；许可与出处见 [第三方说明](attach/THIRD-PARTY.md)。准备桌面发行包（Windows x64）额外执行：
+### 新安装与 NapCat 离线组件
+
+Windows x64 普通用户使用本插件发行资产中的 `whalelife-plugin-qq-0.19.1-windows-x64.zip`：解压后将 `qq/` 放入宿主的 `plugins/`。桌面包已带经过固定 SHA-256 校验的 NapCat 4.18.41 Shell/Framework 和 Frida 原生绑定，安装后不需要访问 NapCat 上游下载地址；QQ 客户端仍由用户自行安装、登录。首次安装不要把整个源码仓库当作插件目录。
+
+已有安装升级时，只更新发行清单中的程序文件，保留 `data/`、账号配置和独立安装的 `sub/qzone/`；不要删除整个正式插件目录。`BUILD.json` 记录本包自己的文件摘要，不包含私人数据或其他插件。默认仍须在控制台明确启用 QQ、选择人格和好友白名单。
+
+NapCat 上游于 2026-11-13 撤下旧源码与发行下载。本仓库保留原许可证和可信文件清单摘要，**不再强制从失效地址下载组件或许可证**。源码构建者从本插件同一发行版的组件资产取得以下未经修改的官方原包，或使用自己保存的同版本原包：
+
+- `NapCat.Shell.Windows.Node.zip`（4.18.41；校验值见 `engine.lock.json`）。
+- `NapCat.Framework.zip`（4.18.41；校验值见 `desktop-engine.lock.json`）。
+
+在 QQ 源码仓库执行，路径替换为原包实际位置：
 
 ```sh
-npm run prepare:engine
-npm run prepare:desktop
+npm run prepare:engine -- --archive "C:/Downloads/NapCat.Shell.Windows.Node.zip"
+npm run prepare:desktop -- --archive "C:/Downloads/NapCat.Framework.zip"
 npm run prepare:attach
 npm run build -- --desktop
 ```
 
-普通 `npm run build` 生成外部 OneBot 模式可用的源码发行包，不自动下载或启动桌面组件。桌面模式未准备组件时会提示缺失。
+也可把这两个原包放进源码目录的 `.artifacts/vendor/`，再运行不带参数的 `prepare:engine` 和 `prepare:desktop`。这两步完全离线：缺包、错误版本、校验失败或异常路径会明确报错，保留先前准备好的组件，不自动改用其他镜像。原始组件保持原样，许可证保留完整原文，不导入运行中的账号配置。`prepare:attach` 仍按锁定摘要准备 Frida 17.24.0；其下载来源与 NapCat 无关，不自动升级。
+
+普通 `npm run build` 生成外部 OneBot 模式包，不带 NapCat 或 Frida 原生绑定。普通包适合已有兼容 OneBot 服务的用户，不能代替完整桌面包。两种构建都在独占空目录中按源码依赖锁安装、核对白名单和摘要，再替换 `dist/qq/`；失败保留旧产物，普通重建会剔除先前桌面包的组件。构建只操作源码仓库的产物目录，不清理正式安装。
+
+NapCat、QQ 和 Frida 各自沿用原许可，不按本仓库 AGPL 重新授权；NapCat 原许可包含非商业及再分发条件，详见 [第三方说明](THIRD_PARTY_NOTICES.md) 和 [原许可证](third-party/napcat/LICENSE)。桌面包及两个原包由统一发布流程审核后上传，源码 Git 仓库不收录第三方二进制、登录资料或组件压缩包。
 
 旧版图库桥接的显式迁移脚本为 `scripts/gallery-migration.mjs`；先以不带 `--apply` 的方式预览，再按需要执行并保留备份。它不属于图库插件源码。
 
