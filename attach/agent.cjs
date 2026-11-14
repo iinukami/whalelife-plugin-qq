@@ -47,6 +47,18 @@ async function identity(wrapper, session) {
   } finally { clearTimeout(timer); if (id !== undefined) profile.removeKernelProfileListener(id); }
 }
 
+// The host only supplies previousWorkdir after verifying a same-account record
+// whose old process has exited. Relaunch inherits environment, not loaded code.
+function inheritedOwnedEnvironment(input, env, wrapperPath) {
+  const samePath = (a, b) => typeof a === 'string' && a.length > 0 && typeof b === 'string' && b.length > 0 &&
+    path.win32.resolve(a).toLowerCase() === path.win32.resolve(b).toLowerCase();
+  if (!samePath(env.NAPCAT_WORKDIR, input.previousWorkdir) || samePath(input.previousWorkdir, input.workdir) ||
+      !samePath(env.NAPCAT_WRAPPER_PATH, wrapperPath) || env.NAPCAT_DISABLE_BYPASS !== '1' || env.NAPCAT_MAIN_PATH) return false;
+  const root = path.win32.dirname(path.win32.dirname(input.framework));
+  const relative = path.win32.relative(path.win32.join(root, 'data/desktop-attach'), path.win32.resolve(input.previousWorkdir));
+  return /^[a-f0-9]{64}\\data\\desktop-bridge\\runtime$/i.test(relative);
+}
+
 function createAgent(runtime = process, globals = globalThis, loadNapCat = url => import(url)) {
 async function run(input) {
   if (Date.now() > input.deadline || runtime.type !== 'browser') throw Error('expired_or_wrong_process');
@@ -72,7 +84,8 @@ async function run(input) {
   }
   if (legacy) return { ...self, bridge: 'legacy' };
   // Avoid competing with a different already loaded protocol component.
-  if (runtime.env.NAPCAT_WORKDIR || runtime.env.NAPCAT_WRAPPER_PATH) throw Error('foreign_bridge');
+  if ((runtime.env.NAPCAT_WORKDIR || runtime.env.NAPCAT_WRAPPER_PATH) &&
+      !inheritedOwnedEnvironment(input, runtime.env, wrapperPath)) throw Error('foreign_bridge');
   const state = { accountId: self.accountId, uid: self.uid, valid: false, failed: false };
   globals[key] = state;
   runtime.env.NAPCAT_WORKDIR = input.workdir;

@@ -117,7 +117,8 @@ export class DesktopAttach {
   async connect(id: string, config: Config, signal: AbortSignal): Promise<Config> {
     const candidate = this.candidates.get(id);
     if (!candidate) throw new QQError('attach_stale', '账号列表已过期，请刷新后重新选择。');
-    const current = (await this.processes(signal)).find(p => processKey(p) === id);
+    const live = await this.processes(signal);
+    const current = live.find(p => processKey(p) === id);
     if (!current) throw new QQError('attach_stale', '所选 QQ 已退出或重新启动，请刷新账号列表。');
     const self = await this.remote(this.root, current, { operation: 'inspect' }, signal);
     if (self.accountId !== candidate.accountId || self.uid !== candidate.uid) throw new QQError('attach_changed', '所选 QQ 的登录账号已改变，请刷新后重新选择。');
@@ -128,7 +129,8 @@ export class DesktopAttach {
       effective = await new DesktopBridge({ ...config, accountId: self.accountId }, signal, base).prepare();
       await verifyDesktopEngine(this.root, signal);
       await this.remote(this.root, current, { operation: 'connect', accountId: self.accountId, uid: self.uid,
-        framework: join(this.root, 'vendor/napcat-framework'), workdir: join(base, 'data/desktop-bridge/runtime') }, signal);
+        framework: join(this.root, 'vendor/napcat-framework'), workdir: join(base, 'data/desktop-bridge/runtime'),
+        previousWorkdir: await this.previousWorkdir(current, live, self.accountId, signal) }, signal);
     }
     signal.throwIfAborted();
     const selection: Selection = { version: 1, process: current, accountId: self.accountId, wsUrl: effective.wsUrl, accessToken: effective.accessToken };
@@ -136,6 +138,21 @@ export class DesktopAttach {
     await writeFile(join(dir, 'selected.json.tmp'), JSON.stringify(selection), { mode: 0o600 });
     signal.throwIfAborted(); await rename(join(dir, 'selected.json.tmp'), join(dir, 'selected.json'));
     return { ...effective, connectionMode: 'attach', accountId: self.accountId };
+  }
+  private async previousWorkdir(current: DesktopProcess, live: DesktopProcess[], accountId: string, signal: AbortSignal) {
+    let saved: Selection;
+    try { saved = JSON.parse(await readFile(join(this.root, 'data/desktop-attach/selected.json'), 'utf8')); }
+    catch { return; } // Missing or untrusted records cannot authorize stale-environment recovery.
+    signal.throwIfAborted();
+    if (saved?.version !== 1 || saved.accountId !== accountId || !saved.process ||
+        !Number.isSafeInteger(saved.process.pid) || saved.process.pid <= 0 ||
+        typeof saved.process.startedAt !== 'string' || !Number.isFinite(Date.parse(saved.process.startedAt)) ||
+        typeof saved.process.path !== 'string' || !saved.process.path ||
+        resolve(saved.process.path).toLowerCase() !== resolve(current.path).toLowerCase() ||
+        !/^ws:\/\/127\.0\.0\.1:\d+\/$/.test(saved.wsUrl) || !/^[a-f0-9]{64}$/.test(saved.accessToken)) return;
+    const previous = processKey(saved.process);
+    if (previous === processKey(current) || live.some(p => processKey(p) === previous)) return;
+    return join(this.root, 'data/desktop-attach', previous, 'data/desktop-bridge/runtime');
   }
   async resume(config: Config, signal: AbortSignal): Promise<Config | undefined> {
     let saved: Selection;

@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
+import { createHash } from 'node:crypto';
 import { readFile, mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { temporaryDirectory } from '../../whalelife/tests/temporary-directory.ts';
@@ -50,6 +51,56 @@ test('closed QQ stays disconnected on reload; corrupted selection is preserved',
   await assert.rejects(attach.resume(selected, signal), /原文件已保留/); assert.equal(await readFile(file, 'utf8'), '{bad');
 });
 
+test('relaunch proof comes only from a valid same-account selection whose old process has exited', async () => {
+  const previous: DesktopProcess = { ...processInfo, pid: 456, startedAt: '2026-10-31T00:00:00Z' };
+  const selection = { version: 1, process: previous, accountId: identity.accountId,
+    wsUrl: 'ws://127.0.0.1:12345/', accessToken: 'a'.repeat(64) };
+  const cases = [
+    { name: 'exited matching process', saved: selection, expected: previous },
+    { name: 'PID reused by a newer process', saved: { ...selection, process: { ...previous, pid: processInfo.pid } }, expected: { ...previous, pid: processInfo.pid } },
+    { name: 'old process still live at connect', saved: selection, oldLive: true },
+    { name: 'same process', saved: { ...selection, process: processInfo } },
+    { name: 'different account', saved: { ...selection, accountId: '100002' } },
+    { name: 'different executable', saved: { ...selection, process: { ...previous, path: 'C:\\OtherQQ\\QQ.exe' } } },
+    { name: 'invalid version', saved: { ...selection, version: 2 } },
+    { name: 'invalid PID', saved: { ...selection, process: { ...previous, pid: 0 } } },
+    { name: 'missing creation time', saved: { ...selection, process: { ...previous, startedAt: '' } } },
+    { name: 'missing process path', saved: { ...selection, process: { ...previous, path: '' } } },
+    { name: 'nonlocal endpoint', saved: { ...selection, wsUrl: 'ws://example.invalid:12345/' } },
+    { name: 'invalid token', saved: { ...selection, accessToken: '' } },
+    { name: 'malformed JSON', raw: '{bad' },
+    { name: 'missing selection' },
+  ];
+  for (const scenario of cases) {
+    const root = await temporaryDirectory('whale-qq-attach-relaunch-'), signal = controller().signal;
+    const file = join(root, 'data/desktop-attach/selected.json');
+    await mkdir(join(root, 'data/desktop-attach'), { recursive: true });
+    const original = 'raw' in scenario ? scenario.raw : 'saved' in scenario ? JSON.stringify(scenario.saved) : undefined;
+    if (original !== undefined) await writeFile(file, original);
+    // A tiny integrity-valid fixture exercises the real connect preparation without loading any binaries.
+    const vendor = join(root, 'vendor/napcat-framework'); await mkdir(vendor, { recursive: true });
+    const files: Record<string, string> = {};
+    for (const name of ['napimain.exe', 'napiloader.dll', 'nativeLoader.cjs', 'napcat.mjs']) {
+      const contents = 'isolated fixture: ' + name;
+      await writeFile(join(vendor, name), contents); files[name] = createHash('sha256').update(contents).digest('hex');
+    }
+    await writeFile(join(root, 'vendor/desktop-manifest.json'), JSON.stringify({ version: '4.18.41', files }));
+    let live = [processInfo], received: Record<string, unknown> | undefined;
+    const attach = new DesktopAttach(root, async () => live, async (_root, _process, input) => {
+      if (input.operation === 'connect') { received = input; throw Error('fixture stops before any platform operation'); }
+      return { ...identity, bridge: 'none' };
+    });
+    const [candidate] = await attach.list(signal);
+    if ('oldLive' in scenario) live = [processInfo, previous];
+    await assert.rejects(attach.connect(candidate.id, { ...config, accountId: identity.accountId }, signal), /fixture stops/);
+    assert.ok(received, scenario.name);
+    assert.equal(received.previousWorkdir, 'expected' in scenario && scenario.expected
+      ? join(root, 'data/desktop-attach', processKey(scenario.expected), 'data/desktop-bridge/runtime') : undefined, scenario.name);
+    if (original !== undefined) assert.equal(await readFile(file, 'utf8'), original, scenario.name);
+    else await assert.rejects(readFile(file), { code: 'ENOENT' });
+  }
+});
+
 function nativeFixture(factory = createAgent) {
   let nextId = 0, nativeLogins = 0, initialize = 0;
   let current: any = { uid: 'u_test', status: 10 }, mappedAccount = '100001';
@@ -85,6 +136,66 @@ function nativeFixture(factory = createAgent) {
     emitMessage: () => messageListener?.onMessage(), upgrade: () => createAgent(runtime, globals, load),
     counts: () => ({ nativeLogins, initialize }), guarded: () => guarded };
 }
+
+function relaunchedFixture() {
+  const f = nativeFixture(), root = 'C:\\WhaleQQ';
+  const input = { ...f.input, framework: root + '\\vendor\\napcat-framework',
+    legacyWorkdir: root + '\\data\\desktop-bridge\\runtime',
+    previousWorkdir: root + '\\data\\desktop-attach\\' + 'a'.repeat(64) + '\\data\\desktop-bridge\\runtime',
+    workdir: root + '\\data\\desktop-attach\\' + 'b'.repeat(64) + '\\data\\desktop-bridge\\runtime' };
+  f.runtime.env.NAPCAT_WORKDIR = input.previousWorkdir;
+  f.runtime.env.NAPCAT_WRAPPER_PATH = 'C:\\QQ\\resources\\app\\wrapper.node';
+  f.runtime.env.NAPCAT_DISABLE_BYPASS = '1';
+  return { ...f, input };
+}
+
+test('verified relaunch inheritance reconnects without login and initializes exactly once', async () => {
+  const f = relaunchedFixture();
+  // QQ relaunch preserves environment strings but creates fresh JS globals.
+  assert.equal(Object.getOwnPropertySymbols(f.globals).length, 0);
+  const inherited = { ...f.runtime.env };
+  assert.equal((await f.agent.run({ ...f.input, operation: 'inspect' })).bridge, 'none');
+  assert.deepEqual(f.runtime.env, inherited);
+  for (let i = 0; i < 3; i++) assert.equal((await f.agent.run({ ...f.input, operation: 'connect' })).bridge, 'attached');
+  assert.equal(f.runtime.env.NAPCAT_WORKDIR, f.input.workdir);
+  assert.deepEqual(f.counts(), { nativeLogins: 0, initialize: 1 });
+  assert.equal(f.listeners.size, 1);
+  f.guarded().getMsgService().sendMsg(); assert.deepEqual(f.events, ['sent']);
+});
+
+test('relaunch rejects unproved, foreign or mismatched environment without initializing or changing it', async () => {
+  const scenarios: { name: string; change(f: ReturnType<typeof relaunchedFixture>): void }[] = [
+    { name: 'no proof', change: f => { (f.input as any).previousWorkdir = undefined; } },
+    { name: 'different old directory', change: f => { f.runtime.env.NAPCAT_WORKDIR += '-other'; } },
+    { name: 'lookalike plugin directory', change: f => { f.input.previousWorkdir = f.runtime.env.NAPCAT_WORKDIR = f.input.previousWorkdir.replace('WhaleQQ', 'WhaleQQ-extra'); } },
+    { name: 'invalid process key', change: f => { f.input.previousWorkdir = f.runtime.env.NAPCAT_WORKDIR = f.input.previousWorkdir.replace('a'.repeat(64), 'not-a-process-key'); } },
+    { name: 'same work directory', change: f => { f.input.previousWorkdir = f.runtime.env.NAPCAT_WORKDIR = f.input.workdir; } },
+    { name: 'another wrapper', change: f => { f.runtime.env.NAPCAT_WRAPPER_PATH = 'C:\\OtherQQ\\wrapper.node'; } },
+    { name: 'missing wrapper', change: f => { delete f.runtime.env.NAPCAT_WRAPPER_PATH; } },
+    { name: 'foreign loader', change: f => { f.runtime.env.NAPCAT_MAIN_PATH = 'C:\\OtherLoader\\main.cjs'; } },
+    { name: 'missing bypass guard', change: f => { delete f.runtime.env.NAPCAT_DISABLE_BYPASS; } },
+  ];
+  for (const scenario of scenarios) {
+    const f = relaunchedFixture(); scenario.change(f); const original = { ...f.runtime.env };
+    await assert.rejects(f.agent.run({ ...f.input, operation: 'connect' }), /foreign_bridge/, scenario.name);
+    assert.deepEqual(f.runtime.env, original, scenario.name);
+    assert.deepEqual(f.counts(), { nativeLogins: 0, initialize: 0 }, scenario.name);
+    assert.equal(f.listeners.size, 0, scenario.name);
+    assert.equal(Object.getOwnPropertySymbols(f.globals).length, 0, scenario.name);
+  }
+});
+
+test('relaunch proof cannot bypass changed identity or a failed already loaded adapter', async () => {
+  const changed = relaunchedFixture(), original = { ...changed.runtime.env };
+  await assert.rejects(changed.agent.run({ ...changed.input, accountId: '100002', operation: 'connect' }), /account_changed/);
+  assert.deepEqual(changed.runtime.env, original); assert.equal(changed.counts().initialize, 0);
+  for (const property of ['failed', 'accountChanged']) {
+    const f = relaunchedFixture(); await f.agent.run({ ...f.input, operation: 'connect' });
+    (f.globals as any)[Symbol.for('whalelife.qq.desktop-attach.v1')][property] = true;
+    await assert.rejects(f.agent.run({ ...f.input, operation: 'connect' }), /bridge_changed/);
+    assert.deepEqual(f.counts(), { nativeLogins: 0, initialize: 1 });
+  }
+});
 
 test('offline pauses native calls and callbacks; verified same-account recovery restores both without new login', async () => {
   const f = nativeFixture(); await f.agent.run({ ...f.input, operation: 'connect' });
