@@ -129,11 +129,13 @@ function nativeFixture(factory = createAgent) {
     } }));
     assert.throws(() => facade.getQRCodePicture(), /desktop_login_owned_by_user/);
   } });
-  const agent = factory(runtime, globals, load);
+  const observations: any[] = [];
+  const observe = (state: any, observedSession: any, workdir: string) => { observations.push({ state, session: observedSession, workdir }); };
+  const agent = factory(runtime, globals, load, observe);
   const input = { deadline: Date.now() + 10000, legacyWorkdir: 'C:\\old', workdir: 'C:\\owned', framework: 'C:\\framework', accountId: '100001', uid: 'u_test' };
-  return { agent, input, listeners, events, runtime, emit, globals,
+  return { agent, input, listeners, events, runtime, emit, globals, observations, session,
     mapAccount: (account: string) => { mappedAccount = account; },
-    emitMessage: () => messageListener?.onMessage(), upgrade: () => createAgent(runtime, globals, load),
+    emitMessage: () => messageListener?.onMessage(), upgrade: () => createAgent(runtime, globals, load, observe),
     counts: () => ({ nativeLogins, initialize }), guarded: () => guarded };
 }
 
@@ -300,4 +302,42 @@ test('new mode permits account selection, keeps legacy defaults and renders vali
   assert.notEqual(processKey(processInfo), processKey({ ...processInfo, startedAt: 'other' }));
   assert.ok(page.includes('连接所选 QQ')); assert.ok(page.includes('打开桌面 QQ'));
   new Function(script);
+});
+
+test('new and already-running adapters install diagnostics on the raw session without a second framework', async () => {
+  const f = nativeFixture();
+  await f.agent.run({ ...f.input, operation: 'inspect' });
+  assert.equal(f.observations.length, 0);
+  await f.agent.run({ ...f.input, operation: 'connect' });
+  await f.upgrade().run({ ...f.input, operation: 'connect' });
+  assert.equal(f.observations.length, 2);
+  for (const observation of f.observations) {
+    assert.equal(observation.session, f.session);
+    assert.equal(observation.workdir, f.input.workdir);
+    assert.equal(observation.state, (f.globals as any)[Symbol.for('whalelife.qq.desktop-attach.v1')]);
+  }
+  assert.deepEqual(f.counts(), { nativeLogins: 0, initialize: 1 });
+  const old = createRequire(import.meta.url)('./fixtures/desktop-agent-v1.cjs');
+  const legacy = nativeFixture(old.createAgent);
+  await legacy.agent.run({ ...legacy.input, operation: 'connect' });
+  assert.equal(legacy.observations.length, 0);
+  await legacy.upgrade().run({ ...legacy.input, operation: 'connect' });
+  assert.equal(legacy.observations.length, 1);
+  assert.equal(legacy.observations[0].session, legacy.session);
+  assert.deepEqual(legacy.counts(), { nativeLogins: 0, initialize: 1 });
+});
+
+test('diagnostic setup exceptions cannot break new or already-running native connections', async () => {
+  const f = nativeFixture((runtime: any, globals: any, load: any) =>
+    createAgent(runtime, globals, load, () => { throw Error('synthetic diagnostic setup error'); }));
+  for (let i = 0; i < 2; i++) {
+    await f.agent.run({ ...f.input, operation: 'connect' });
+    f.guarded().getMsgService().sendMsg();
+  }
+  const state = (f.globals as any)[Symbol.for('whalelife.qq.desktop-attach.v1')];
+  assert.equal(state.valid, true);
+  assert.equal(state.failed, false);
+  assert.equal(state.diagnosticsSetupFailed, true);
+  assert.deepEqual(f.counts(), { nativeLogins: 0, initialize: 1 });
+  assert.deepEqual(f.events, ['sent', 'sent']);
 });

@@ -16,7 +16,7 @@ const copied = ['plugin.yaml', 'README.md', 'MINIAPP-SHARING.md', 'VIDEO-SHARING
   ...legal, 'engine.lock.json', 'desktop-engine.lock.json', 'attach-engine.lock.json',
   'scripts/gallery-migration.mjs', 'sub/gallery/plugin.yaml',
   'managed/bootstrap.cjs', 'managed/windows-job.cs', 'managed/windows-job.ps1',
-  'attach/worker.mjs', 'attach/agent.cjs', 'attach/napi.js', 'attach/FRIDA-COPYING.txt', 'attach/THIRD-PARTY.md',
+  'attach/worker.mjs', 'attach/agent.cjs', 'attach/diagnostics.cjs', 'attach/napi.js', 'attach/FRIDA-COPYING.txt', 'attach/THIRD-PARTY.md',
   'third-party/napcat/LICENSE', 'third-party/napcat/INTEGRITY.json'];
 const generated = ['main.js', 'index.ts', 'main.d.ts', 'sub/gallery/index.ts', 'package.json', 'package-lock.json'];
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');

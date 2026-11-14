@@ -5,6 +5,7 @@
 // Runs in QQ's existing main JS loop. Never initializes or closes a QQ session.
 const { pathToFileURL } = require('node:url');
 const path = require('node:path');
+const { installDiagnostics } = require('./diagnostics.cjs');
 const key = Symbol.for('whalelife.qq.desktop-attach.v1');
 
 const onlineStatus = info => typeof info?.uid === 'string' && info.uid.length > 0 && Number.isInteger(info.status) && info.status > 0 && info.status !== 20;
@@ -59,7 +60,11 @@ function inheritedOwnedEnvironment(input, env, wrapperPath) {
   return /^[a-f0-9]{64}\\data\\desktop-bridge\\runtime$/i.test(relative);
 }
 
-function createAgent(runtime = process, globals = globalThis, loadNapCat = url => import(url)) {
+function createAgent(runtime = process, globals = globalThis, loadNapCat = url => import(url), observe = installDiagnostics) {
+const observeSafely = (state, session, workdir) => {
+  try { observe(state, session, workdir); }
+  catch { state.diagnosticsSetupFailed = true; } // Never fail or revive the actual bridge for diagnostics.
+};
 async function run(input) {
   if (Date.now() > input.deadline || runtime.type !== 'browser') throw Error('expired_or_wrong_process');
   const wrapperPath = path.join(runtime.mainModule.filename.split('application.asar')[0], 'wrapper.node');
@@ -80,6 +85,7 @@ async function run(input) {
     await identity(wrapper, session);
     await owned.ready;
     if (!owned.valid || owned.failed || owned.accountChanged || Date.now() > input.deadline) throw Error('bridge_changed');
+    observeSafely(owned, session, runtime.env.NAPCAT_WORKDIR);
     return { ...self, bridge: 'attached' };
   }
   if (legacy) return { ...self, bridge: 'legacy' };
@@ -116,6 +122,7 @@ async function run(input) {
   } });
   state.ready = Promise.resolve().then(async () => {
       monitorIdentity(state, session.getProfileService());
+      observeSafely(state, session, input.workdir);
       await identity(wrapper, session);
       if (!state.valid || state.accountChanged || Date.now() > input.deadline) throw Error('account_changed');
       const m = await loadNapCat(pathToFileURL(path.join(input.framework, 'napcat.mjs')).href);
