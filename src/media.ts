@@ -8,6 +8,7 @@ import type { Context, ModelConnection } from 'whalelife';
 import type { OneBot } from './onebot.ts';
 import { object, QQError, type Config } from './config.ts';
 import { faceText, segments, type PrivateEvent, type Segment } from './messages.ts';
+import { sharedVideoText } from './inbound-share.ts';
 
 export class MediaReader {
   private ctx: Context;
@@ -135,6 +136,7 @@ export class MediaReader {
         this.signal.throwIfAborted();
         const { type, data } = segment;
         if (type === 'text') { if (typeof data.text === 'string') text.push(data.text); }
+        else if (type === 'json' || type === 'share') text.push(sharedVideoText(type, data) ?? ('[暂不支持的消息类型：' + type + ']'));
         else if (type === 'at') text.push(`[提及QQ：${String(data.qq).slice(0, 30)}]`);
         else if (type === 'face') {
           let label = faceText(data);

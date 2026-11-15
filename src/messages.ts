@@ -36,6 +36,8 @@ export function privateEvent(raw: Record<string, unknown>, config: Config): Priv
   const messageId = id(raw.message_id), parts = segments(raw.message ?? raw.raw_message);
   const stable = parts.map(({ type, data }) => {
     if (type === 'text') return [type, data.text];
+    if (type === 'json' || type === 'xml') return [type, digest(data.data ?? null)];
+    if (type === 'share') return [type, data.url, data.title, data.content];
     if (['image', 'record', 'mface'].includes(type)) return [type, data.file ?? data.file_id ?? data.url, data.emoji_id];
     return [type, data.id, data.qq, data.summary ?? data.text];
   });
