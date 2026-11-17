@@ -29,7 +29,7 @@ export const page = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-
 <section class="card"><h2>图库</h2><label id="galleryOptions" class="check"><input id="galleryEnabled" type="checkbox">使用图库收藏与发送图片</label><p><small id="galleryStatus"></small></p></section>
 <section class="card"><label>视频分享方式<select id="videoShareFormat"><option value="card">图文卡（封面＋标题＋链接）</option><option value="miniapp">小程序</option></select><small>小程序分享的部分视频可能无法播放，遇到这种情况可切换为图文卡。</small></label></section>
 <section class="card"><h2>图片与语音理解</h2><div class="grid">
-<label class="wide">看图模型<select id="visionModelId"></select><small>从主干模型配置中选择支持视觉的 OpenAI 兼容模型。图片和动态表情包先识别，再交给会话人格理解。</small></label>
+<label class="wide">看图模型<select id="visionModelId"></select><small>从主干模型配置中选择支持视觉的 OpenAI 兼容模型。图片和动态表情包先识别，再交给会话人格理解。默认输出上限 2048 token；可在所选模型的高级请求参数中设置 max_tokens 或 max_completion_tokens，后者优先。</small></label>
 <label>语音识别方式<select id="speechMode"><option value="platform">协议端语音转写</option><option value="model">使用语音识别模型</option></select></label>
 <label>语音识别模型<select id="sttModelId"></select><small>托管组件支持协议端转写，也可选择独立 STT 模型。</small></label></div>
 <p><small>识别失败会显示在处理状态中，不会把未识别的媒体当作已理解。识别调用有独立费用，暂未汇总到主干会话用量。</small></p></section>

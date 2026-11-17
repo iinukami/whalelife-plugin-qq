@@ -34,7 +34,7 @@ function galleryModels(f: Fixture) {
     f.modelCalls.push({ path: req.url, body: raw });
     res.setHeader('Content-Type', 'application/json');
     res.end(JSON.stringify(req.url?.endsWith('/embeddings') ? { data: [{ embedding: [1, 0] }], usage: { total_tokens: 4 } }
-      : { choices: [{ message: { content: input.max_tokens === 700 ? '小猫挥手。' : JSON.stringify({ description: '小猫挥手', tags: ['猫'], purposes: ['meme'] }) } }], usage: { total_tokens: 8 } }));
+      : { choices: [{ message: { content: input.messages?.some((message: any) => message.role === 'system' && typeof message.content === 'string' && message.content.includes('只输出 JSON 对象')) ? JSON.stringify({ description: '小猫挥手', tags: ['猫'], purposes: ['meme'] }) : '小猫挥手。' } }], usage: { total_tokens: 8 } }));
   });
 }
 async function fakeGallery(root: string) {

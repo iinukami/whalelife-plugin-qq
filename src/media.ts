@@ -72,6 +72,15 @@ export class MediaReader {
   }
   async image(data: Record<string, unknown>, offer?: (bytes: Buffer, mime: string) => Promise<string>): Promise<string> {
     const model = this.connection(this.config.visionModelId, 'vision');
+    const parameters = { ...model.parameters };
+    for (const key of ['max_tokens', 'max_completion_tokens']) {
+      if (!Object.hasOwn(parameters, key)) continue;
+      const value = parameters[key];
+      if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0)
+        throw new QQError('vision_parameters', `看图模型的 ${key} 必须为正整数，请在该模型的高级请求参数中修改。`);
+    }
+    if (Object.hasOwn(parameters, 'max_completion_tokens')) delete parameters.max_tokens;
+    else if (!Object.hasOwn(parameters, 'max_tokens')) parameters.max_tokens = 2048;
     let url = data.url;
     if (!url) {
       const info = await this.bot.request('get_image', { file: data.file ?? data.file_id }, this.signal);
@@ -91,12 +100,18 @@ export class MediaReader {
       content.push({ type: 'image_url', image_url: { url: `data:image/png;base64,${png.toString('base64')}` } });
     }
     const response = await this.modelRequest(model, '/chat/completions', JSON.stringify({
-      ...model.parameters, model: model.model, stream: false, max_tokens: 700,
+      ...parameters, model: model.model, stream: false,
       messages: [{ role: 'user', content }],
     }), true);
     const first = Array.isArray(response.choices) ? object(response.choices[0]) : {};
-    const text = object(first.message).content;
-    if (typeof text !== 'string' || !text.trim()) throw new QQError('vision_empty', '看图模型未返回识别结果。');
+    const message = object(first.message), text = message.content;
+    if (typeof text !== 'string' || !text.trim()) {
+      if (first.finish_reason === 'length')
+        throw new QQError('vision_empty', '看图模型达到输出或上下文上限，未返回识别正文；请检查该模型的输出上限及上下文容量。');
+      if ([message.reasoning_content, message.reasoning].some(value => typeof value === 'string' && value.trim()))
+        throw new QQError('vision_empty', '看图模型仅返回思考内容，未返回识别正文；请检查该模型的输出上限和思考配置。');
+      throw new QQError('vision_empty', '看图模型未返回识别结果。');
+    }
     const mime = 'image/' + metadata.format;
     const reference = offer ? await offer(bytes, mime) : '';
     return text.slice(0, 4000) + (reference ? `\n${reference}` : '');
