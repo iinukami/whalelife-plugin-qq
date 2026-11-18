@@ -5,6 +5,7 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import type { Context, ChannelHandle, ChannelTurn, OutgoingMessage, ToolSession } from 'whalelife';
 import { object, account, id, safeError, QQError, type Config } from './config.ts';
+import { TemporaryDrafts, type DraftKey } from './temporary-drafts.ts';
 import { OneBot, type LinkState } from './onebot.ts';
 import { MediaReader } from './media.ts';
 import { privateEvent, digest, splitText, type PrivateEvent } from './messages.ts';
@@ -53,8 +54,9 @@ export class QQRuntime {
   private bindingState: { state: 'waiting' | 'ready'; sessionId?: string; error?: string } = { state: 'waiting' };
   private modelSend?: { sessionId: string; peer: string; text: string };
   // Only the redacted descriptor enters the public channel's durable dedup index.
-  // The original exists solely during this call; a host retry cannot replay it.
-  private transientSend?: { sessionId: string; peer: string; descriptor: string; text: string };
+  // This descriptor cannot replay the original. Only a live send may offer its unsent tail.
+  private temporaryDrafts = new TemporaryDrafts();
+  private transientSend?: { sessionId: string; peer: string; descriptor: string; text: string; allowDraft: boolean };
   private inflight = new Set<string>();
   private lastSent = 0;
   private deliveryResults = new Map<string, TextDeliveryReceipt>();
@@ -460,7 +462,14 @@ export class QQRuntime {
         this.lastSent = Date.now();
       } catch (error) {
         if (error instanceof QQError && ['platform_failed', 'offline'].includes(error.code) && !signal.aborted) {
-          ledger.parts[i] = { state: 'failed', ...(error.notSent ? { notSent: true as const } : {}) }; await this.ctx.config.save(file, ledger);
+          ledger.parts[i] = { state: 'failed', ...(error.notSent ? { notSent: true as const } : {}) };
+          await this.ctx.config.save(file, ledger);
+          const live = this.transientSend;
+          if (error.notSent && fresh && !signal.aborted && message.transient && message.replyTo === undefined &&
+            live?.allowDraft && live.peer === message.peer && live.sessionId === message.sessionId && live.text === message.text) {
+            this.temporaryDrafts.offer({ sessionId: message.sessionId, accountId: this.config.accountId, deliveryId: message.deliveryId },
+              target, parts, ledger);
+          }
         } else if (error instanceof QQError && error.notSent) {
           ledger.parts[i] = { state: 'failed', notSent: true }; await this.ctx.config.save(file, ledger);
         }
@@ -526,7 +535,7 @@ export class QQRuntime {
       const sourceSessionId = options.acknowledgement || options.transient ? undefined : (await this.channel.context(peer)).id;
       if (options.modelGenerated && options.sessionId) this.modelSend = { sessionId: options.sessionId, peer, text: input.text };
       const text = options.transient ? `[QQ 临时私聊；正文不留存；指纹 ${digest([this.config.accountId, peer, input.messageId, input.text])}]` : input.text;
-      if (options.transient) this.transientSend = { sessionId: options.sessionId!, peer, descriptor: text, text: input.text };
+      if (options.transient) this.transientSend = { sessionId: options.sessionId!, peer, descriptor: text, text: input.text, allowDraft: !options.acknowledgement };
       this.directTextSource = options.acknowledgement || options.transient ? undefined : {
         messageId: input.messageId, direction: 'out', peer, sessionId: sourceSessionId!, text: input.text,
       };
@@ -540,6 +549,11 @@ export class QQRuntime {
     this.directSending = task.catch(() => {});
     return task;
   }
+  claimTemporaryDraft(key: DraftKey) {
+    return this.temporaryDrafts.claim(key, userId => !this.signal.aborted && this.config.permission === 'full' &&
+      this.config.accountId === key.accountId && this.config.allowedUsers.includes(userId));
+  }
+  releaseTemporaryDraft(key: DraftKey) { return this.temporaryDrafts.release(key); }
   async listTextDeliveries(input: DeliveryList) {
     try { this.signal.throwIfAborted(); return await this.continuations.list(input); }
     catch (error) { return textDeliveryError(error, this.signal); }
@@ -626,7 +640,7 @@ export class QQRuntime {
     incomingMerge: { enabled: this.config.mergeIncoming, supported: typeof this.channel.openTurn === 'function' } }; }
   stop(): Promise<void> {
     if (this.stopPromise) return this.stopPromise;
-    this.stopped = true; this.controller.abort(); this.bot.stop();
+    this.stopped = true; this.controller.abort(); this.temporaryDrafts.clear(); this.bot.stop();
     try { this.channel.dispose(); } catch { /* Host may already have revoked this generation. */ }
     this.stopPromise = Promise.allSettled([...this.pending, this.tail, this.directSending, this.sending, this.miniAppSending, this.bindingSync, this.media.dispose()]).then(() => {});
     return this.stopPromise;

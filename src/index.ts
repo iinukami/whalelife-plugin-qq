@@ -69,6 +69,9 @@ export async function apply(ctx: Context) {
   } catch (e) { error = safeError(e); ctx.logger.warn('QQ 插件等待有效配置', { error }); }
   const qqService = {
     apiVersion: '1.0.0', status,
+    temporaryDraftApiVersion: '1.0.0',
+    claimTemporaryDraft: (key: import('./temporary-drafts.ts').DraftKey) => runtime?.claimTemporaryDraft(key) ?? { status: 'unavailable' },
+    releaseTemporaryDraft: (key: import('./temporary-drafts.ts').DraftKey) => runtime?.releaseTemporaryDraft(key) ?? { status: 'unavailable' },
     textDeliveryApiVersion: '1.0.0',
     textDeliveryResumeSupported: typeof ctx.sessions.current === 'function',
     listTextDeliveries: (input: import('./text-continuation.ts').DeliveryList) => runtime
