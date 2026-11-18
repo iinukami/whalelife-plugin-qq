@@ -29,7 +29,8 @@ export function textDeliveryReceipt(ledger: Delivery): TextDeliveryReceipt {
   let sent = 0, unknown = 0, unattempted = 0;
   for (let i = 0; i < total!; i++) {
     const part = ledger.parts[i];
-    if (!part) unattempted++;
+    if (i >= ledger.parts.length) unattempted++;
+    else if (!part || typeof part !== 'object' || Array.isArray(part)) unknown++;
     else if (part.state === 'sent' && typeof part.messageId === 'string' && /^-?\d{1,20}$/.test(part.messageId) && BigInt(part.messageId) !== 0n) sent++;
     else if (!(part.state === 'failed' && part.notSent === true)) unknown++;
   }

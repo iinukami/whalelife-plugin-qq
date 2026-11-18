@@ -69,6 +69,16 @@ export async function apply(ctx: Context) {
   } catch (e) { error = safeError(e); ctx.logger.warn('QQ 插件等待有效配置', { error }); }
   const qqService = {
     apiVersion: '1.0.0', status,
+    textDeliveryApiVersion: '1.0.0',
+    textDeliveryResumeSupported: typeof ctx.sessions.current === 'function',
+    listTextDeliveries: (input: import('./text-continuation.ts').DeliveryList) => runtime
+      ? runtime.listTextDeliveries(input) : { status: 'blocked', confirmed: false, reason: 'offline' },
+    textDelivery: (input: import('./text-continuation.ts').DeliveryKey) => runtime
+      ? runtime.textDelivery(input) : { status: 'blocked', confirmed: false, reason: 'offline' },
+    resumeTextDelivery: (input: import('./text-continuation.ts').DeliveryDecision, options: { signal: AbortSignal }) => runtime
+      ? runtime.resumeTextDelivery(input, options) : { status: 'blocked', confirmed: false, reason: 'offline' },
+    dismissTextDelivery: (input: import('./text-continuation.ts').DeliveryDecision) => runtime
+      ? runtime.dismissTextDelivery(input) : { status: 'blocked', confirmed: false, reason: 'offline' },
     qzoneApiVersion: '1.0.0',
     qzoneSocialApiVersion: '1.0.0',
     qzoneReferenceApiVersion: '1.0.0',

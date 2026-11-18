@@ -17,6 +17,7 @@ import { SpaceTransport } from './space/transport.ts';
 import { SpaceWebTransport } from './space/web-transport.ts';
 import type { PublishPayload } from './space/types.ts';
 import { textDeliveryReceipt, unknownDelivery, type Delivery, type TextDeliveryReceipt } from './text-delivery.ts';
+import { TextContinuations, textDeliveryError, blockedTextDelivery, type DeliveryKey, type DeliveryList, type DeliveryDecision, type DeliverySource } from './text-continuation.ts';
 
 interface Inbox { version: 1; fingerprint: string; state: 'preparing' | 'ready' | 'failed'; text?: string; sessionId?: string; }
 type IncomingBinding = { peer: string; sessionId: string; messageId: string };
@@ -57,6 +58,9 @@ export class QQRuntime {
   private inflight = new Set<string>();
   private lastSent = 0;
   private deliveryResults = new Map<string, TextDeliveryReceipt>();
+  private continuations: TextContinuations;
+  private directTextSource?: DeliverySource & { peer: string; sessionId: string; text: string };
+  private resumingText?: { deliveryId: string; sessionId: string };
   private stopped = false;
   private stopPromise?: Promise<void>;
   state: LinkState = { state: 'disconnected' };
@@ -65,7 +69,23 @@ export class QQRuntime {
     this.ctx = ctx; this.config = config;
     this.inboundMedia = inboundMedia;
     this.signal = AbortSignal.any([ctx.signal, this.controller.signal]);
-    this.bot = new OneBot(config, this.signal, event => this.accept(event), state => { this.state = state; });
+    this.continuations = new TextContinuations(ctx, config.accountId, async entry => {
+      if (this.signal.aborted || this.stopped) return 'cancelled';
+      if (this.state.state !== 'online') return 'offline';
+      if (this.config.permission !== 'full') return 'permission';
+      if (!this.config.allowedUsers.includes(entry.peer.slice(7)) || entry.peer === `direct:${this.config.accountId}`) return 'recipient';
+      if (this.incomingBindings.has(entry.peer) || this.turns.has(entry.peer) || this.opening.has(entry.peer)) return 'in_progress';
+      try {
+        if (typeof ctx.sessions.current !== 'function') return 'host_blocked';
+        if (await ctx.sessions.current() !== entry.sessionId || (await this.channel.context(entry.peer)).id !== entry.sessionId) return 'session_changed';
+      } catch { return 'host_blocked'; }
+    });
+    this.bot = new OneBot(config, this.signal, event => this.accept(event), state => {
+      const changed = this.state.state !== state.state; this.state = state;
+      if (changed && !this.signal.aborted) {
+        try { ctx.emit('plugin:qq:connection-changed', { accountId: config.accountId, state: state.state }); } catch { /* notifications are advisory */ }
+      }
+    });
     this.space = new SpaceTransport(this.bot, this.signal, () => ({ accountId: this.config.accountId, online: this.state.state === 'online' }));
     this.spaceWeb = new SpaceWebTransport(this.bot, this.signal, () => ({ accountId: this.config.accountId, online: this.state.state === 'online' }));
     this.outboundMedia = new OutboundMedia(ctx, config, async (userId, message, interval, signal, markPending) => {
@@ -350,6 +370,8 @@ export class QQRuntime {
     if (failed) throw new QQError(failure instanceof QQError ? failure.code : 'delivery', receipt.summary + ' ' + safeError(failure));
   }
   private async describeDelivery(result: Awaited<ReturnType<ChannelHandle['send']>>) {
+    // The host has finished saving its result before a continuation becomes eligible.
+    await this.continuations.settle(result).catch(() => this.notice('continuation_storage', undefined, '续发状态未能保存；不会自动补发。'));
     let delivery = result.deliveryId ? this.deliveryResults.get(result.deliveryId) : undefined;
     if (result.deliveryId) this.deliveryResults.delete(result.deliveryId);
     if (!delivery && result.deliveryId) {
@@ -376,6 +398,7 @@ export class QQRuntime {
     if (!this.config.allowedUsers.includes(target) || target === this.config.accountId) throw new QQError('peer', '发送对象不在私聊白名单内。');
     const file = `delivery-${digest(message.deliveryId)}.json`;
     let saved = await this.ctx.config.read<Partial<Delivery>>(file);
+    const fresh = Object.keys(saved).length === 0;
     const fingerprint = digest([message.peer, message.text]);
     if (saved.version !== undefined && saved.version !== 1) throw new QQError('state_version', '发送状态版本不受支持。');
     if (saved.fingerprint && saved.fingerprint !== fingerprint) throw new QQError('delivery_conflict', '投递标识与内容不匹配。');
@@ -402,12 +425,25 @@ export class QQRuntime {
     const ledger = saved as Delivery;
     observe(ledger);
     await this.ctx.config.save(file, ledger);
+    await this.continuations.begin(message, message.replyTo !== undefined
+      ? { messageId: message.replyTo, direction: 'in' }
+      : this.directTextSource?.peer === message.peer && this.directTextSource.sessionId === message.sessionId && this.directTextSource.text === message.text
+        ? { messageId: this.directTextSource.messageId, direction: 'out' } : undefined, fresh);
+    // A generic failed envelope is as ambiguous as pending. Never retry it.
+    if (textDeliveryReceipt(ledger).unknownParts !== 0)
+      throw new QQError('uncertain', '已有分段结果不确定，已阻止续发，请核对。');
     for (let i = 0; i < parts.length; i++) {
       signal.throwIfAborted();
       if (ledger.parts[i]?.state === 'sent') continue;
       if (ledger.parts[i]?.state === 'pending') throw new QQError('uncertain', '上次发送结果不确定，已阻止重发，请人工核对。');
       await delay(Math.max(plan.intervals[i], this.config.minReplyIntervalMs - (Date.now() - this.lastSent)), undefined, { signal });
       signal.throwIfAborted();
+      if (this.resumingText?.deliveryId === message.deliveryId) {
+        if (this.config.permission !== 'full' || !this.config.allowedUsers.includes(target) ||
+          await this.ctx.sessions.current() !== this.resumingText.sessionId)
+          throw new QQError('session_changed', '续发条件已改变，剩余内容未发送。', true);
+        signal.throwIfAborted();
+      }
       ledger.parts[i] = { state: 'pending' };
       try { await this.ctx.config.save(file, ledger); signal.throwIfAborted(); }
       catch (error) { ledger.parts[i] = { state: 'failed', notSent: true }; throw error; }
@@ -487,18 +523,62 @@ export class QQRuntime {
       }
       signal.throwIfAborted();
       if (!options.acknowledgement) await this.closeReplyInput(peer, options.sessionId ?? this.incomingBindings.get(peer)?.sessionId);
+      const sourceSessionId = options.acknowledgement || options.transient ? undefined : (await this.channel.context(peer)).id;
       if (options.modelGenerated && options.sessionId) this.modelSend = { sessionId: options.sessionId, peer, text: input.text };
       const text = options.transient ? `[QQ 临时私聊；正文不留存；指纹 ${digest([this.config.accountId, peer, input.messageId, input.text])}]` : input.text;
       if (options.transient) this.transientSend = { sessionId: options.sessionId!, peer, descriptor: text, text: input.text };
+      this.directTextSource = options.acknowledgement || options.transient ? undefined : {
+        messageId: input.messageId, direction: 'out', peer, sessionId: sourceSessionId!, text: input.text,
+      };
       try {
         const result = await this.describeDelivery(await this.channel.send({ peer, messageId: input.messageId, text }, { signal }));
         if (!options.transient) return result;
         const { text: _descriptor, ...receipt } = result;
         return { ...receipt, transient: true as const };
-      } finally { this.modelSend = undefined; this.transientSend = undefined; }
+      } finally { this.modelSend = undefined; this.transientSend = undefined; this.directTextSource = undefined; }
     });
     this.directSending = task.catch(() => {});
     return task;
+  }
+  async listTextDeliveries(input: DeliveryList) {
+    try { this.signal.throwIfAborted(); return await this.continuations.list(input); }
+    catch (error) { return textDeliveryError(error, this.signal); }
+  }
+  async textDelivery(input: DeliveryKey) {
+    try { this.signal.throwIfAborted(); return await this.continuations.get(input); }
+    catch (error) { return textDeliveryError(error, this.signal); }
+  }
+  async dismissTextDelivery(input: DeliveryDecision) {
+    try { this.signal.throwIfAborted(); return await this.continuations.dismiss(input); }
+    catch (error) { return textDeliveryError(error, this.signal); }
+  }
+  resumeTextDelivery(input: DeliveryDecision, options: { signal: AbortSignal }) {
+    if (!options?.signal || typeof options.signal.addEventListener !== 'function') return Promise.resolve(blockedTextDelivery('invalid_input'));
+    const signal = AbortSignal.any([this.signal, options.signal]);
+    const task = this.directSending.then(async () => {
+      let claimed = false, confirmed = false;
+      try {
+        signal.throwIfAborted();
+        const claim = await this.continuations.claim(input);
+        if (!claim.entry) return { status: 'sent' as const, confirmed: true, item: claim.item };
+        claimed = true; this.resumingText = { deliveryId: claim.entry.deliveryId, sessionId: claim.entry.sessionId }; signal.throwIfAborted();
+        // Never rebind or call the model here. Core retains its own lease/receipt checks.
+        const result = await this.channel.retry(claim.entry.peer, claim.entry.messageId, { direction: claim.entry.direction, signal });
+        confirmed = result.status === 'sent';
+        await this.describeDelivery(result);
+        const detail = await this.continuations.get({ sessionId: input.sessionId, deliveryId: input.deliveryId });
+        return { status: detail.item.state === 'sent' ? 'sent' as const : 'incomplete' as const,
+          confirmed: detail.item.state === 'sent', item: detail.item };
+      } catch (error) {
+        if (confirmed) return { status: 'sent' as const, confirmed: true, receiptUnavailable: true };
+        if (claimed) {
+          await this.continuations.hostBlocked(input).catch(() => {});
+          return blockedTextDelivery(signal.aborted ? 'cancelled' : 'host_blocked');
+        }
+        return textDeliveryError(error, signal);
+      } finally { this.resumingText = undefined; }
+    });
+    this.directSending = task.catch(() => {}); return task;
   }
   sendMedia(input: MediaAction, options: MediaSendOptions = {}) {
     const signal = AbortSignal.any([this.signal, ...(options.signal ? [options.signal] : [])]);

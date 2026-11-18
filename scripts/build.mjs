@@ -12,7 +12,7 @@ import { ensurePlainDirectory, fileInventory, inventoryDigest } from './vendor-p
 
 const repo = fileURLToPath(new URL('../', import.meta.url));
 const legal = ['LICENSE', 'LICENSE-ADDITIONAL', 'NOTICE.md', 'THIRD_PARTY_NOTICES.md'];
-const copied = ['plugin.yaml', 'README.md', 'MINIAPP-SHARING.md', 'VIDEO-SHARING.md',
+const copied = ['plugin.yaml', 'README.md', 'MINIAPP-SHARING.md', 'VIDEO-SHARING.md', 'TEXT-DELIVERY.md',
   ...legal, 'engine.lock.json', 'desktop-engine.lock.json', 'attach-engine.lock.json',
   'scripts/gallery-migration.mjs', 'sub/gallery/plugin.yaml',
   'managed/bootstrap.cjs', 'managed/windows-job.cs', 'managed/windows-job.ps1',

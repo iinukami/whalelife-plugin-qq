@@ -90,7 +90,7 @@ test('stopping between segments cancels remaining output and a restart does not 
 });
 
 test('explicit retry keeps the original segment plan after config change; legacy ledgers keep old chunks', async t => {
-  const f = await fixture(t, { config: { segmentedReply: cfg() } }); await f.online();
+  const f = await fixture(t, { config: { segmentedReply: cfg({ interval: '0.4,0.4' }) } }); await f.online();
   let transport: any;
   const register = f.app.channels.register.bind(f.app.channels);
   f.app.channels.register = (adapter: ChannelAdapter, owner?: string) => { transport = adapter.send; return register(adapter, owner); };
@@ -98,19 +98,20 @@ test('explicit retry keeps the original segment plan after config change; legacy
   let attempts = 0;
   f.setAction((data, socket) => {
     if (data.action !== 'send_private_msg') return false;
-    if (++attempts !== 2) return false;
-    socket.send(JSON.stringify({ echo: data.echo, status: 'failed', retcode: 100, data: null })); return true;
+    if (++attempts !== 1) return false;
+    socket.send(JSON.stringify({ echo: data.echo, status: 'ok', retcode: 0, data: { message_id: 9001 } }));
+    setTimeout(() => socket.terminate(), 30); return true;
   });
   const message = { channel: 'qq', account: '100001', peer: 'direct:200002', sessionId: 'test', text: '甲。乙。丙。', deliveryId: 'test-segment-retry', replyTo: '123' };
   const options = { signal: new AbortController().signal };
-  await assert.rejects(transport(message, options)); assert.deepEqual(sentText(f), ['甲。', '乙。']);
+  await assert.rejects(transport(message, options)); assert.deepEqual(sentText(f), ['甲。']);
   assert.equal((await f.save({ segmentedReply: cfg({ regex: '.+', cleanupRegex: '[。]' }) })).status, 200); await f.online();
-  await transport(message, options); assert.deepEqual(sentText(f), ['甲。', '乙。', '乙。', '丙。']);
+  await transport(message, options); assert.deepEqual(sentText(f), ['甲。', '乙。', '丙。']);
   assert.equal(f.generations.length, 0);
   const dir = join(f.root, 'plugins/qq/data'), file = (await readdir(dir)).find(n => n.startsWith('delivery-'))!;
   const ledger = JSON.parse(await readFile(join(dir, file), 'utf8'));
   // Simulate an old, successfully sent v1 single-message record without a frozen plan.
-  delete ledger.texts; delete ledger.intervals; ledger.parts = [{ state: 'sent', messageId: 'old-id' }];
+  delete ledger.texts; delete ledger.intervals; ledger.parts = [{ state: 'sent', messageId: '9001' }];
   await writeFile(join(dir, file), JSON.stringify(ledger));
-  await transport(message, options); assert.equal(sends(f).length, 4);
+  await transport(message, options); assert.equal(sends(f).length, 3);
 });
