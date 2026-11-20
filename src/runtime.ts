@@ -597,7 +597,7 @@ export class QQRuntime {
   sendMedia(input: MediaAction, options: MediaSendOptions = {}) {
     const signal = AbortSignal.any([this.signal, ...(options.signal ? [options.signal] : [])]);
     signal.throwIfAborted();
-    if (this.mediaActions >= 2) throw new QQError('busy', '图文发送队列已满，未提交。');
+    if (this.mediaActions >= 2) throw new QQError('busy', '媒体发送队列已满，未提交。');
     this.mediaActions++;
     const task = this.sending.then(() => this.outboundMedia.execute(input, signal, options.retry === true,
       () => this.closeReplyInput(`direct:${input.userId}`, input.sessionId))).finally(() => { this.mediaActions--; });

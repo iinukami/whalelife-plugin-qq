@@ -120,6 +120,7 @@ export async function apply(ctx: Context) {
     mediaApiVersion: '1.0.0',
     registerMediaReceiver: inboundMedia.register.bind(inboundMedia),
     outboundMediaApiVersion: '1.0.0',
+    outboundVoiceApiVersion: '1.0.0',
     sendMedia: (input: MediaAction, options?: MediaSendOptions) => {
       ctx.signal.throwIfAborted();
       if (!runtime) throw new QQError('offline', 'QQ 连接尚未开启。');

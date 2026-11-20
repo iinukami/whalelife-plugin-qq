@@ -28,6 +28,12 @@ WhaleLife 交流 QQ 群：**962935021**
 
 首次安装默认关闭。进入插件设置选择人格和好友白名单，明确启用。只处理白名单好友私聊，不处理群消息或自身消息。
 
+### 私聊语音条
+
+从 0.23.0 起，语音插件可用现有的 `qq_say` 把合成的 WAV 直接发成私聊语音条。QQ 接入启用、具备完全执行权限且好友在白名单时可发送。语音合成和音色由调用方负责。桌面包使用随包 NapCat 转码，外部 OneBot 服务需要支持 `record` 语音段及 WAV 转码。
+
+其他插件可检测 `qq.outboundVoiceApiVersion === '1.0.0'`，调用 `qq.sendMedia({ sessionId, userId, actionId, personaId, parts: [{ type: 'voice', id, mime: 'audio/wav', base64 }] }, { signal })`。一次发送一条独立语音，`id` 为 WAV 字节的 SHA-256 小写十六进制，`base64` 为不带前缀的编码。大小受 QQ 单项媒体限制及 25 MiB 上限约束。稳定的动作 ID 对应同一份音频；可用 `qq.mediaDelivery({ sessionId, userId, actionId })` 查回执。获得有效平台消息 ID 才确认发送，提交后结果未知时禁止重发。QQ 的回执记录只保存摘要、元数据与状态。
+
 - Windows 桌面模式复用桌面 QQ 登录；首次使用需要本人完成登录/手机验证。不会修改 QQ 快捷方式。
 - 外部模式连接已有 OneBot v11 服务，地址和令牌由用户配置。
 - 对话模型沿用人格/主干选择；识图选择视觉模型，语音可用平台转写或 STT 模型。

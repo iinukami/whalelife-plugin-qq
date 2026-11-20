@@ -43,7 +43,10 @@ async function snapshotHost(t: TestContext, baseline: 'current' | 'minimum') {
   const commit = execFileSync('git', [...gitArgs, 'rev-parse', ref], { encoding: 'utf8' }).trim();
   if (baseline === 'minimum') assert.equal(commit, expectedMinimum, 'Frozen minimum host must not move');
   assert.match(commit, /^[a-f0-9]{40}$/);
-  execFileSync('git', [...gitArgs, 'archive', '--format=tar', '--output=' + join(root, 'host.tar'), commit, 'core', 'package.json']);
+  // Newer hosts load their bundled catalogs during import; the frozen minimum predates them.
+  const hostFiles = execFileSync('git', [...gitArgs, 'ls-tree', '--name-only', commit, '--',
+    'core', 'package.json', 'market'], { encoding: 'utf8' }).trim().split(/\r?\n/);
+  execFileSync('git', [...gitArgs, 'archive', '--format=tar', '--output=' + join(root, 'host.tar'), commit, ...hostFiles]);
   execFileSync('tar', ['-xf', join(root, 'host.tar'), '-C', root]);
   await symlink(join(sourceHost, 'node_modules'), join(root, 'node_modules'), 'junction');
   t.diagnostic(`Release installation host ${baseline}: ${commit}`);
