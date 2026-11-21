@@ -63,7 +63,9 @@ export class OneBot {
           }
           call.reject(platformError(value, this.config.connectionMode === 'attach' && call.plainText));
         }
-      } else if (this.online && value.post_type === 'message' && Buffer.byteLength(bytes.toString()) <= 256 * 1024) {
+      } else if (this.online && (value.post_type === 'message' ||
+        (value.post_type === 'notice' && value.notice_type === 'notify' && value.sub_type === 'poke' && value.group_id)) &&
+        Buffer.byteLength(bytes.toString()) <= 256 * 1024) {
         try { this.onEvent(value); } catch { /* callback boundary */ }
       }
     });
@@ -117,7 +119,7 @@ export class OneBot {
       }
     } finally { this.checkingDesktop = false; }
   }
-  request(action: 'get_friend_list', params: Record<string, unknown>, signal: AbortSignal): Promise<unknown[]>;
+  request(action: 'get_friend_list' | 'get_group_list' | 'get_group_member_list', params: Record<string, unknown>, signal: AbortSignal): Promise<unknown[]>;
   request(action: string, params: Record<string, unknown>, signal: AbortSignal, handshake?: boolean, timeoutMs?: number): Promise<Record<string, unknown>>;
   request(action: string, params: Record<string, unknown>, signal: AbortSignal, handshake = false, timeoutMs = this.config.requestTimeoutMs): Promise<Record<string, unknown> | unknown[]> {
     if (signal.aborted || this.signal.aborted) throw new QQError('cancelled', '操作在提交前已取消。', true);
@@ -136,7 +138,12 @@ export class OneBot {
       timer.unref();
       this.pending.set(echo, { plainText: action === 'send_private_msg' && params.auto_escape === true && Array.isArray(params.message) &&
           params.message.length > 0 && params.message.every(p => object(p).type === 'text'),
-        resolve: value => resolve(action === 'get_friend_list' ? (Array.isArray(value) ? value : []) : object(value)),
+        resolve: value => {
+          if (action === 'get_group_list' || action === 'get_group_member_list') {
+            if (Array.isArray(value)) resolve(value);
+            else reject(new QQError('group_response', '群查询回执格式无效。'));
+          } else resolve(action === 'get_friend_list' ? (Array.isArray(value) ? value : []) : object(value));
+        },
         reject, dispose: () => { clearTimeout(timer); signal.removeEventListener('abort', abort); } });
       signal.addEventListener('abort', abort, { once: true });
       ws.send(JSON.stringify({ action, params, echo }), error => {

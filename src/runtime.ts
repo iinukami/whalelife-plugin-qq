@@ -11,6 +11,8 @@ import { MediaReader } from './media.ts';
 import { privateEvent, digest, splitText, type PrivateEvent } from './messages.ts';
 import { replyPlan } from './segmentation.ts';
 import { InboundMedia } from './inbound-media.ts';
+import { GroupSubscription } from './group-subscription.ts';
+import { GroupConnection } from './group-connection.ts';
 import { OutboundMedia, type MediaAction, type MediaKey, type MediaSendOptions } from './outbound-media.ts';
 import { OutboundMiniApp, miniAppFailure, type MiniAppShare, type MiniAppKey, type MiniAppOptions } from './outbound-miniapp.ts';
 import { prepareVideoCard, type ShareMessage } from './video-share.ts';
@@ -44,6 +46,8 @@ export class QQRuntime {
   private directSending: Promise<unknown> = Promise.resolve();
   private bindingSync?: Promise<void>;
   private inboundMedia: InboundMedia;
+  private groupSubscription: GroupSubscription;
+  readonly groups: GroupConnection;
   private outboundMedia: OutboundMedia;
   private outboundMiniApp: OutboundMiniApp;
   private miniAppSending: Promise<void> = Promise.resolve();
@@ -67,8 +71,9 @@ export class QQRuntime {
   private stopPromise?: Promise<void>;
   state: LinkState = { state: 'disconnected' };
   recent: Notice[] = [];
-  constructor(ctx: Context, config: Config, inboundMedia = new InboundMedia()) {
+  constructor(ctx: Context, config: Config, inboundMedia = new InboundMedia(), groupSubscription = new GroupSubscription()) {
     this.ctx = ctx; this.config = config;
+    this.groupSubscription = groupSubscription;
     this.inboundMedia = inboundMedia;
     this.signal = AbortSignal.any([ctx.signal, this.controller.signal]);
     this.continuations = new TextContinuations(ctx, config.accountId, async entry => {
@@ -87,6 +92,22 @@ export class QQRuntime {
       if (changed && !this.signal.aborted) {
         try { ctx.emit('plugin:qq:connection-changed', { accountId: config.accountId, state: state.state }); } catch { /* notifications are advisory */ }
       }
+    });
+    this.groups = new GroupConnection(ctx, config, this.bot, groupSubscription, this.signal, (groupId, message, signal, beforeSubmit) => {
+      const task = this.sending.then(async () => {
+        await delay(Math.max(0, config.minReplyIntervalMs - (Date.now() - this.lastSent)), undefined, { signal });
+        if (this.state.state !== 'online') throw new QQError('offline', 'QQ 尚未在线。', true);
+        await beforeSubmit();
+        const result = await this.bot.request('send_group_msg', {
+          group_id: Number.isSafeInteger(Number(groupId)) ? Number(groupId) : groupId, message, auto_escape: true,
+        }, signal);
+        const messageId = id(result.message_id);
+        if (messageId === '0') throw new QQError('uncertain', '协议端未提供有效的群消息 ID。');
+        this.lastSent = Date.now();
+        return messageId;
+      });
+      this.sending = task.then(() => {}, () => {});
+      return task;
     });
     this.space = new SpaceTransport(this.bot, this.signal, () => ({ accountId: this.config.accountId, online: this.state.state === 'online' }));
     this.spaceWeb = new SpaceWebTransport(this.bot, this.signal, () => ({ accountId: this.config.accountId, online: this.state.state === 'online' }));
@@ -223,6 +244,10 @@ export class QQRuntime {
   }
   private accept(raw: Record<string, unknown>) {
     if (this.signal.aborted || this.stopped) return;
+    if (raw.message_type === 'group' || raw.post_type === 'notice') {
+      this.groupSubscription.offer(raw, this.config.accountId, this.signal);
+      return;
+    }
     let event: PrivateEvent | null;
     try { event = privateEvent(raw, this.config); }
     catch (error) { this.notice('invalid_event', undefined, safeError(error)); return; }

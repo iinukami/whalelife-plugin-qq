@@ -26,7 +26,26 @@ WhaleLife 交流 QQ 群：**962935021**
 
 从 0.16.0 起，模型可用 `qq_acknowledge({text})` 在当前来信的耗时操作前简短接话，然后继续工具调用，最后由原渠道发送结果。入口从可信当前来信确定收件人和稳定动作 ID，无需额外查询联系人；最多 80 个字符，同一来信重复调用不会重新投递，不能换文字重试。接话沿用发送权限、白名单、分段、取消及临时资料规则，只确认消息发送，不代表业务操作完成。普通聊天直接回复，不插入固定文案或定时提示；是否接话、说什么由模型决定，插件无法保证模型每次都选择该工具。
 
-首次安装默认关闭。进入插件设置选择人格和好友白名单，明确启用。只处理白名单好友私聊，不处理群消息或自身消息。
+首次安装默认关闭。进入插件设置选择人格和好友白名单，明确启用。私聊渠道只处理白名单好友消息，并忽略自身消息。
+
+### 社区群聊子插件
+
+从 0.24.0 起，独立安装的 `qq/group` 可通过 `ctx.get('qq')` 复用当前账号的 OneBot 连接。群白名单、触发规则、群会话和记忆策略由子插件管理。未注册接收器时，QQ 会忽略群事件。群正文不会通过 QQ 私聊渠道进入当前网页会话。
+
+`groupApiVersion` 为 `1.0.0`。子插件在启动和重连时注册接收器，返回值是注销函数。切换账号后需要按新账号重新注册。
+
+```js
+const unregister = qq.registerGroupReceiver(onGroupEvent, {
+  signal: ctx.signal,
+  allowsGroup: groupId => config.enabled && enabledGroups.has(groupId),
+})
+```
+
+`allowsGroup` 应读取当前配置，返回布尔值或 Promise。父插件在投递正文、查询成员和实际发送前检查范围。旧版只传 `signal` 时仍可用 `listGroups` 枚举群供配置，`groupStatus().scope` 为 `missing`。授权后为 `scoped`，未注册或账号不匹配为 `inactive`。群消息和对机器人的群戳一戳经回调实时投递。
+
+只读接口为 `groupStatus()`、`listGroups(options?)`、`groupInfo(groupId, options?)`、`listGroupMembers(groupId, options?)`。发送接口为 `sendGroupText({groupId, text, atUserIds?, replyTo?, actionId?}, options?)` 和 `sendGroupMedia({groupId, parts, actionId?}, options?)`，支持图文和单条 WAV。文字引用必须属于本次订阅已收到的同群消息。各段独立传稳定的 `actionId` 可跨重载防重。`options.signal` 可取消请求。
+
+确认发送时返回 `status: 'sent'`、`confirmed: true` 和非零 `messageId`。文字未确认会抛错，媒体返回 `not_submitted` 或 `uncertain`。结果不确定时应保留待核对状态，自动补发可能造成重复。
 
 ### 私聊语音条
 

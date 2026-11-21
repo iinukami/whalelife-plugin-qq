@@ -30,6 +30,10 @@ function validateVoice(part: VoicePart, maxBytes: number) {
   const bytes = Buffer.from(part.base64, 'base64');
   if (bytes.length > maxBytes || bytes.toString('base64') !== part.base64 || createHash('sha256').update(bytes).digest('hex') !== part.id)
     throw new QQError('voice', '语音数据、编码或摘要无效。');
+  validateWavBytes(bytes);
+}
+
+export function validateWavBytes(bytes: Buffer) {
   const invalid = () => new QQError('voice', '需要包含有效格式和音频数据的完整 WAV 文件。');
   if (bytes.length < 44 || bytes.toString('latin1', 0, 4) !== 'RIFF' || bytes.toString('latin1', 8, 12) !== 'WAVE' ||
     bytes.readUInt32LE(4) !== bytes.length - 8) throw invalid();

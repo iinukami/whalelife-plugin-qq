@@ -13,6 +13,9 @@ import { DesktopAttach } from './desktop-attach.ts';
 import { replyPlan } from './segmentation.ts';
 import { registerQQTools } from './tools.ts';
 import { InboundMedia } from './inbound-media.ts';
+import { GroupSubscription, type GroupReceiver, type GroupSubscriptionOptions } from './group-subscription.ts';
+import type { GroupOptions } from './group-connection.ts';
+import type { GroupMediaInput, GroupTextInput } from './group-outbound.ts';
 import type { MediaAction, MediaKey, MediaSendOptions } from './outbound-media.ts';
 import { miniAppFailure, type MiniAppShare, type MiniAppKey, type MiniAppOptions } from './outbound-miniapp.ts';
 import type { PublishPayload, BrowseInput, Interaction, ReferenceInput } from './space/types.ts';
@@ -26,6 +29,8 @@ export async function apply(ctx: Context) {
   let desktop: DesktopBridge | undefined;
   const attach = new DesktopAttach();
   const inboundMedia = new InboundMedia();
+  const groupSubscription = new GroupSubscription();
+  ctx.effect(() => () => groupSubscription.dispose());
   const builtinGallery = typeof ctx.optional === 'function';
   let unsubscribeGallery: (() => void) | undefined;
   ctx.effect(() => () => unsubscribeGallery?.());
@@ -42,18 +47,18 @@ export async function apply(ctx: Context) {
     if (config.connectionMode === 'managed') {
       const current = new ManagedEngine(config, ctx.signal, effective => {
         if (engine !== current || ctx.signal.aborted) return;
-        runtime = new QQRuntime(ctx, effective, inboundMedia); runtime.start();
+        runtime = new QQRuntime(ctx, effective, inboundMedia, groupSubscription); runtime.start();
       }, () => { if (engine !== current) return; const old = runtime; runtime = undefined; return old?.stop(); });
       engine = current; current.start();
     } else {
       if (config.connectionMode === 'attach') {
         const effective = await attach.resume(config, ctx.signal);
         if (!effective) { error = '请选择当前已登录的桌面 QQ。'; return; }
-        ctx.signal.throwIfAborted(); runtime = new QQRuntime(ctx, effective, inboundMedia); runtime.start(); return;
+        ctx.signal.throwIfAborted(); runtime = new QQRuntime(ctx, effective, inboundMedia, groupSubscription); runtime.start(); return;
       }
       if (config.connectionMode === 'desktop') desktop = new DesktopBridge(config, ctx.signal);
       const effective = desktop ? await desktop.prepare() : config;
-      ctx.signal.throwIfAborted(); runtime = new QQRuntime(ctx, effective, inboundMedia); runtime.start();
+      ctx.signal.throwIfAborted(); runtime = new QQRuntime(ctx, effective, inboundMedia, groupSubscription); runtime.start();
     }
   };
   const status = () => ({ ...(runtime?.status() ?? { state: engine?.status.state ?? (config.enabled ? 'unconfigured' : 'disabled'), error: engine?.status.error || error, queued: 0, recent: [] }),
@@ -67,7 +72,21 @@ export async function apply(ctx: Context) {
     }
     await start();
   } catch (e) { error = safeError(e); ctx.logger.warn('QQ 插件等待有效配置', { error }); }
+  const groupAccount = () => runtime?.config.accountId || config.accountId || '';
+  const activeGroups = () => {
+    if (!runtime || ctx.signal.aborted) throw new QQError('offline', 'QQ 群服务尚未连接。', true);
+    return runtime.groups;
+  };
   const qqService = {
+    groupApiVersion: '1.0.0',
+    groupStatus: () => ({ online: runtime?.state.state === 'online', accountId: groupAccount() || null, scope: groupSubscription.scope(groupAccount()) }),
+    registerGroupReceiver: (receive: GroupReceiver, options: GroupSubscriptionOptions) => groupSubscription.register(groupAccount(), receive, options),
+    listGroups: (options?: GroupOptions) => activeGroups().listGroups(options),
+    groupInfo: (groupId: string, options?: GroupOptions) => activeGroups().groupInfo(groupId, options),
+    listGroupMembers: (groupId: string, options?: GroupOptions) => activeGroups().listGroupMembers(groupId, options),
+    sendGroupText: (input: GroupTextInput, options?: GroupOptions) => activeGroups().sendText(input, options),
+    sendGroupMedia: (input: GroupMediaInput, options?: GroupOptions) => runtime && !ctx.signal.aborted ? runtime.groups.sendMedia(input, options) :
+      Promise.resolve({ status: 'not_submitted', confirmed: false, retryAutomatically: false, error: 'QQ 群服务尚未连接。' }),
     apiVersion: '1.0.0', status,
     temporaryDraftApiVersion: '1.0.0',
     claimTemporaryDraft: (key: import('./temporary-drafts.ts').DraftKey) => runtime?.claimTemporaryDraft(key) ?? { status: 'unavailable' },
@@ -269,7 +288,7 @@ export async function apply(ctx: Context) {
       await stop(); signal.throwIfAborted(); ctx.signal.throwIfAborted();
       const next = { ...config, accountId: effective.accountId };
       await ctx.config.save('config.json', next); config = next; revision = randomUUID(); error = '';
-      runtime = new QQRuntime(ctx, effective, inboundMedia); runtime.start();
+      runtime = new QQRuntime(ctx, effective, inboundMedia, groupSubscription); runtime.start();
     });
     changes = task.catch(() => {}); await task;
     res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ accountId: config.accountId, status: status() }));
