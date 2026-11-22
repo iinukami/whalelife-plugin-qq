@@ -36,7 +36,7 @@ export const segmentationDefaults: SegmentedReply = {
 const legacyMediaHosts = ['qq.com', 'qpic.cn', 'gtimg.cn', 'gtimg.com'];
 export interface Config {
   schemaVersion: 3; enabled: boolean; connectionMode: 'attach' | 'desktop' | 'managed' | 'external'; qqPath: string; wsUrl: string; accessToken: string;
-  accountId: string; allowedUsers: string[]; personaId: string; permission: Permission;
+  accountId: string; allowedUsers: string[]; permission: Permission;
   visionModelId: string; speechMode: 'platform' | 'model'; sttModelId: string;
   requestTimeoutMs: number; reconnectMaxMs: number; minReplyIntervalMs: number;
   maxMessageChars: number; maxMediaBytes: number; maxMediaItems: number;
@@ -48,7 +48,7 @@ export interface Config {
 }
 export const defaults: Config = {
   schemaVersion: 3, enabled: false, connectionMode: 'desktop', qqPath: '', wsUrl: '', accessToken: '', accountId: '', allowedUsers: [],
-  personaId: '', permission: 'off', visionModelId: '', speechMode: 'platform', sttModelId: '',
+  permission: 'off', visionModelId: '', speechMode: 'platform', sttModelId: '',
   requestTimeoutMs: 30000, reconnectMaxMs: 30000, minReplyIntervalMs: 1500,
   maxMessageChars: 16000, maxMediaBytes: 20 * 1024 * 1024, maxMediaItems: 8,
   mediaHosts: [...legacyMediaHosts, 'multimedia.nt.qq.com.cn'],
@@ -85,14 +85,13 @@ export function parseConfig(input: unknown): Config {
   const raw = object(input);
   if (raw.schemaVersion !== undefined && ![0, 1, 2, 3].includes(raw.schemaVersion as number))
     throw new QQError('config_version', '配置来自较新版本，请升级插件；原配置保留。');
-  // v0 used url/token/selfId/allowUsers/persona; migration preserves values, never invents accounts.
+  // Preserve the original v0 connection and recipient settings.
   const v = { ...defaults, ...raw };
   if (raw.connectionMode === undefined && raw.schemaVersion === 2) v.connectionMode = 'managed';
   if (raw.connectionMode === undefined && (raw.schemaVersion === 0 || raw.schemaVersion === 1 || raw.wsUrl || raw.url)) v.connectionMode = 'external';
   if (raw.schemaVersion === 0) Object.assign(v, {
     wsUrl: raw.url ?? v.wsUrl, accessToken: raw.token ?? v.accessToken,
     accountId: raw.selfId ?? v.accountId, allowedUsers: raw.allowUsers ?? v.allowedUsers,
-    personaId: raw.persona ?? v.personaId,
   });
   if (typeof v.enabled !== 'boolean') throw new QQError('config', '连接开关必须为布尔值。');
   const cfg = { ...defaults, enabled: v.enabled };
@@ -105,7 +104,7 @@ export function parseConfig(input: unknown): Config {
   cfg.segmentedReply = parseSegmentation(raw.segmentedReply);
   if (!['attach', 'desktop', 'managed', 'external'].includes(v.connectionMode)) throw new QQError('config', '连接方式无效。');
   cfg.connectionMode = v.connectionMode;
-  for (const key of ['qqPath', 'wsUrl', 'accessToken', 'accountId', 'personaId', 'visionModelId', 'sttModelId'] as const)
+  for (const key of ['qqPath', 'wsUrl', 'accessToken', 'accountId', 'visionModelId', 'sttModelId'] as const)
     cfg[key] = str(v[key], key, key === 'accessToken' ? 4096 : 1000);
   if (cfg.accountId) cfg.accountId = account(cfg.accountId);
   if (!Array.isArray(v.allowedUsers) || v.allowedUsers.length > 200) throw new QQError('config', '白名单最多 200 个 QQ 号。');
@@ -144,11 +143,8 @@ export function parseConfig(input: unknown): Config {
   return cfg;
 }
 export function validateSelections(ctx: Context, config: Config) {
-  if (config.enabled && !config.personaId &&
-    (!('supportsActivePersona' in ctx.channels) || ctx.channels.supportsActivePersona !== true))
-    throw new QQError('persona', '当前宿主尚不支持跟随主干人格。请升级 WhaleLife，或在 QQ 设置中选择固定人格。');
-  if (config.personaId && !ctx.personas.list().some(p => p.id === config.personaId))
-    throw new QQError('persona', '所选人格不可用。');
+  if (config.enabled && (!('supportsActivePersona' in ctx.channels) || ctx.channels.supportsActivePersona !== true))
+    throw new QQError('persona', '当前 WhaleLife 不支持渠道跟随主干人格，请升级后再启用 QQ。');
   for (const [key, types] of [['visionModelId', ['chat', 'custom']], ['sttModelId', ['stt']]] as const) {
     if (!config[key]) continue;
     const model = ctx.models.connection(config[key]);

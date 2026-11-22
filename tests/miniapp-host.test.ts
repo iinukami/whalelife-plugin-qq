@@ -4,10 +4,9 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { readFile, readdir, symlink } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { baselineBoot, positiveBaselines } from './host-baseline.ts';
 import { fixture, until } from './fixture.ts';
 import { temporaryDirectory } from './temporary-directory.ts';
 import { segmentationDefaults } from '../src/config.ts';
@@ -41,19 +40,8 @@ async function setup(t: Parameters<typeof fixture>[0], hostBoot?: any, config = 
   return { f, sessionId, service, input, send, status };
 }
 
-for (const baseline of ['current', '213b52b']) test(`mini-app public service on ${baseline}: signed JSON, privacy, session pinning, dedup and reload`, { timeout: 45000 }, async t => {
-  let hostBoot;
-  if (baseline !== 'current') {
-    const dir = await temporaryDirectory('whale-qq-miniapp-host-');
-    const host = fileURLToPath(new URL('../../whalelife', import.meta.url));
-    const gitArgs = ['-c', `safe.directory=${host.replaceAll('\\', '/')}`, '-C', host];
-    const commit = execFileSync('git', [...gitArgs, 'rev-parse', 'refs/tags/213b52b^{commit}'], { encoding: 'utf8' }).trim();
-    assert.equal(commit, '7c8e3898b2bc7cb0b892eb0ab2feec0ca9c8aaf0');
-    execFileSync('git', [...gitArgs, 'archive', '--format=tar', '--output=' + join(dir, 'host.tar'), commit, 'core', 'package.json']);
-    execFileSync('tar', ['-xf', join(dir, 'host.tar'), '-C', dir]);
-    await symlink(join(host, 'node_modules'), join(dir, 'node_modules'), 'junction');
-    hostBoot = (await import(pathToFileURL(join(dir, 'core/index.ts')).href)).boot;
-  }
+for (const baseline of positiveBaselines) test(`mini-app public service on ${baseline}: signed JSON, privacy, session pinning, dedup and reload`, { timeout: 45000 }, async t => {
+  const hostBoot = await baselineBoot(baseline);
   const { f, sessionId, service, send, status } = await setup(t, hostBoot);
   assert.equal(service().miniAppShareApiVersion, '1.0.0');
   const current = typeof f.app.sessions.current === 'function' ? await f.app.sessions.current() : undefined;

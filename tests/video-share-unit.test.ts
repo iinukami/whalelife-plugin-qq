@@ -25,7 +25,7 @@ const imageResponse = (bytes: Uint8Array, headers: Record<string, string> = {}) 
 function fixture() {
   const files = new Map<string, any>(), experiences: any[] = [], generated: any[] = [];
   const cards: ShareMessage[] = [], miniapps: string[] = [];
-  const config = { ...defaults, accountId: '100001', allowedUsers: ['200002'], personaId: 'a', permission: 'full' as const };
+  const config = { ...defaults, accountId: '100001', allowedUsers: ['200002'], permission: 'full' as const };
   let prepared = 0, closed = 0;
   let prepare = async (_value: MiniAppShare, _signal: AbortSignal) => structuredClone(coveredCard);
   let submit = async () => '9001';
@@ -48,7 +48,7 @@ function fixture() {
     submit: async (user, message, _signal, pending, dispatched) => {
       assert.equal(user, input.userId); await beforePending(); await pending(); dispatched();
       cards.push(structuredClone(message)); return submit();
-    } });
+    } }, () => 'a');
   const controller = new AbortController(); let service = create();
   return { files, experiences, generated, cards, miniapps, config, controller,
     prepared: () => prepared, closed: () => closed,

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { defaults, parseConfig, publicConfig } from '../src/config.ts';
+import { defaults, parseConfig, publicConfig, validateSelections } from '../src/config.ts';
 import { privateEvent, segments, splitText } from '../src/messages.ts';
 const config = parseConfig({ ...defaults, accountId: '100001', allowedUsers: ['200002'] });
 const event = { post_type: 'message', message_type: 'private', sub_type: 'friend', self_id: 100001, user_id: 200002, message_id: -12, message: [{ type: 'text', data: { text: '你好🙂' } }] };
@@ -14,16 +14,22 @@ test('configuration is offline by default, validates credentials/identity and mi
   const migrated = parseConfig({ schemaVersion: 0, url: 'ws://localhost:3001/', token: 'SECRET', selfId: '100001', allowUsers: ['200002'], persona: 'a' });
   assert.equal(migrated.schemaVersion, 3); assert.equal(migrated.connectionMode, 'external'); assert.equal(migrated.accountId, '100001'); assert.equal(migrated.accessToken, 'SECRET');
   assert.ok(!JSON.stringify(publicConfig(migrated)).includes('SECRET'));
-  assert.equal(migrated.personaId, 'a');
+  assert.equal('persona' in migrated || 'personaId' in migrated, false);
 });
-test('enabled QQ follows the host when personaId is omitted or cleared and preserves explicit choices', () => {
+test('QQ drops the old persona setting and requires active-persona support only when enabled', () => {
   const base = { enabled: true, connectionMode: 'desktop', accountId: '100001', allowedUsers: ['200002'] };
-  assert.equal(parseConfig(base).personaId, '');
-  for (const schemaVersion of [1, 2, 3]) {
-    const pinned = parseConfig({ ...base, schemaVersion, personaId: 'chosen' });
-    assert.equal(publicConfig(pinned).personaId, 'chosen');
-    assert.equal(parseConfig({ ...pinned, personaId: '' }).personaId, '');
+  const ctx = (supported?: boolean) => ({ channels: supported === undefined ? {} : { supportsActivePersona: supported } }) as Parameters<typeof validateSelections>[0];
+  for (const schemaVersion of [0, 1, 2, 3]) {
+    const parsed = parseConfig({ ...base, schemaVersion, persona: 'old', personaId: 'retired' });
+    for (const config of [parsed, publicConfig(parsed)]) {
+      assert.equal('persona' in config || 'personaId' in config, false);
+      assert.deepEqual(config.allowedUsers, base.allowedUsers);
+    }
+    assert.doesNotThrow(() => validateSelections(ctx(true), parsed));
+    assert.throws(() => validateSelections(ctx(), parsed), /升级/);
+    assert.throws(() => validateSelections(ctx(false), parsed), /升级/);
   }
+  assert.doesNotThrow(() => validateSelections(ctx(), parseConfig({})));
 });
 test('video share format defaults to cards for old configs and accepts only explicit supported formats', () => {
   assert.equal(defaults.videoShareFormat, 'card');

@@ -30,7 +30,7 @@ function fixture(readSelectedPersona?: () => Promise<string>) {
   const files = new Map<string, unknown>(), experiences: any[] = [], generated: any[] = [], sent: string[] = [];
   let saveHook: ((value: any) => void) | undefined, sessionHook: (() => void) | undefined;
   let generateHook: (() => Promise<any> | any) | undefined, sendHook: (() => Promise<string> | string) | undefined;
-  const config = { ...defaults, accountId: '100001', allowedUsers: ['200002'], personaId: 'a', permission: 'full' as const };
+  const config = { ...defaults, accountId: '100001', allowedUsers: ['200002'], permission: 'full' as const };
   const ctx = {
     config: { read: async (name: string) => structuredClone(files.get(name) ?? {}),
       save: async (name: string, value: unknown) => { saveHook?.(value); files.set(name, structuredClone(value)); } },
@@ -41,7 +41,7 @@ function fixture(readSelectedPersona?: () => Promise<string>) {
     generated.push(params); return generateHook ? generateHook() : { data: ark() };
   }, async (_userId, payload, _signal, pending, dispatched) => {
     await pending(); dispatched(); sent.push(payload); return sendHook ? sendHook() : '9001';
-  }, undefined, readSelectedPersona);
+  }, undefined, readSelectedPersona ?? (() => 'a'));
   const controller = new AbortController(); let service = create();
   return { files, experiences, generated, sent, controller, config, personas,
     run: (patch: Partial<MiniAppShare> = {}, options: any = { permission: 'full' }, guard = async () => {}, close = async () => {}) => service.execute({ ...input, ...patch }, options, controller.signal, guard, close),
@@ -68,7 +68,6 @@ test('signed mini-app preserves full QQ payload, hashes private fields, confirms
 test('mini-app uses one persona per send and looks up duplicate receipts independently of the host selection', async () => {
   let selected = 'host-a', reads = 0;
   const f = fixture(async () => { reads++; if (!selected) throw Error('no selection'); return selected; });
-  f.config.personaId = '';
   assert.equal((await f.status()).status, 'not_found');
   f.generate(() => { selected = 'host-b'; return { data: ark() }; });
   assert.equal((await f.run({ personaId: undefined })).confirmed, true);
@@ -79,10 +78,10 @@ test('mini-app uses one persona per send and looks up duplicate receipts indepen
   assert.equal((await f.run({ personaId: 'host-a' })).error, 'conflict');
   assert.equal(f.sent.length, 1);
   assert.equal((await f.run({ actionId: 'caller', personaId: 'caller' })).confirmed, true);
-  f.config.personaId = 'pinned';
-  assert.equal((await f.run({ actionId: 'fixed', personaId: undefined })).confirmed, true);
-  assert.deepEqual(f.personas, ['host-a', 'host-a', 'caller', 'caller', 'pinned', 'pinned']);
-  assert.equal(reads, 1);
+  selected = 'host-c';
+  assert.equal((await f.run({ actionId: 'later', personaId: undefined })).confirmed, true);
+  assert.deepEqual(f.personas, ['host-a', 'host-a', 'caller', 'caller', 'host-c', 'host-c']);
+  assert.equal(reads, 2);
 });
 
 test('permissions, recipient, session and unstructured/unsafe content fail before protocol calls', async () => {

@@ -36,7 +36,7 @@ export class QQRuntime {
   private space: SpaceTransport;
   readonly spaceWeb: SpaceWebTransport;
   private media: MediaReader;
-  private channel: ChannelHandle & { currentPersona?(): string };
+  private channel: ChannelHandle;
   private tail: Promise<void> = Promise.resolve();
   private admissions = new Map<string, Promise<void>>();
   private pending = new Set<Promise<void>>();
@@ -154,7 +154,7 @@ export class QQRuntime {
       { prepare: (input, signal) => prepareVideoCard(input, config, signal), submit: submitShare }, readSelectedPersona);
     this.media = new MediaReader(ctx, config, this.bot, this.signal);
     this.channel = ctx.channels.register({ id: 'qq', name: 'QQ 私聊', account: config.accountId,
-      ...(config.personaId ? { persona: config.personaId } : { personaMode: 'active' as const }),
+      personaMode: 'active',
       permission: config.permission, send: (message, { signal }) => {
         const task = this.sending.then(() => {
           if (message.replyTo === undefined && message.text.startsWith('[QQ 临时私聊；正文不留存；')) {

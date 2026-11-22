@@ -126,8 +126,8 @@ export class OutboundMiniApp {
   private card?: CardDelivery;
   private cache = new Map<string, { ledger: Ledger; saved: boolean }>();
   private readSelectedPersona: () => string | Promise<string>;
-  constructor(ctx: Context, config: Config, prepareArk: PrepareArk, submit: Submit, card?: CardDelivery,
-    readSelectedPersona: () => string | Promise<string> = () => config.personaId) {
+  constructor(ctx: Context, config: Config, prepareArk: PrepareArk, submit: Submit, card: CardDelivery | undefined,
+    readSelectedPersona: () => string | Promise<string>) {
     this.readSelectedPersona = readSelectedPersona;
     this.ctx = ctx; this.config = config; this.prepareArk = prepareArk; this.submit = submit; this.card = card;
   }
@@ -175,7 +175,7 @@ export class OutboundMiniApp {
   }
   private async sessionPersona(sessionId: string, personaId?: string) {
     try {
-      const selected = personaId ?? (this.config.personaId || await this.readSelectedPersona());
+      const selected = personaId ?? await this.readSelectedPersona();
       await this.ctx.sessions.context(sessionId, selected);
       return selected;
     } catch { return fail('session'); }

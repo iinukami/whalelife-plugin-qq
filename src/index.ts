@@ -69,6 +69,9 @@ export async function apply(ctx: Context) {
       await ctx.config.save(`config-v${raw.schemaVersion}-backup.json`, raw); await ctx.config.save('config.json', config);
     } else if (Array.isArray(raw.mediaHosts) && raw.mediaHosts.length === 4 && config.mediaHosts.length === 5) {
       await ctx.config.save('config-before-nt-media.json', raw); await ctx.config.save('config.json', config);
+    } else if (Object.hasOwn(raw, 'persona') || Object.hasOwn(raw, 'personaId')) {
+      const { persona, personaId, ...settings } = raw;
+      await ctx.config.save('config.json', settings);
     }
     await start();
   } catch (e) { error = safeError(e); ctx.logger.warn('QQ 插件等待有效配置', { error }); }
@@ -245,7 +248,7 @@ export async function apply(ctx: Context) {
       changes = save.catch(() => {}); await save;
     } else if (req.method !== 'GET') throw new QQError('method', '仅支持 GET 和 POST。');
     res.setHeader('Content-Type', 'application/json; charset=utf-8'); res.setHeader('Cache-Control', 'no-store');
-    res.end(JSON.stringify({ config: publicConfig(config), revision, status: status(), personas: ctx.personas.list(), models: ctx.models.list() }));
+    res.end(JSON.stringify({ config: publicConfig(config), revision, status: status(), models: ctx.models.list() }));
   });
   ctx.web.page('/plugins/qq/config', configHandler);
   ctx.web.api('/plugins/qq/config', configHandler);

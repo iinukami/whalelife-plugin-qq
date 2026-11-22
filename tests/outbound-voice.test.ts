@@ -56,7 +56,7 @@ function fixture(options: { afterPending?: QQError; permission?: 'off' | 'full';
     frames.push(message);
     if (options.afterPending) throw options.afterPending;
     return '7101';
-  }, options.readSelectedPersona);
+  }, options.readSelectedPersona ?? (() => 'a'));
   return { open, records, experiences, frames, personas };
 }
 

@@ -31,8 +31,18 @@ function requiresResume(t: TestContext, f: Fixture) {
   t.skip('Selected host lacks the current-session contract; explicit host_blocked behavior is tested separately.'); return false;
 }
 
-async function make(t: TestContext, observe = false) {
+async function make(t: TestContext, observe = false, withoutCurrentSession = false) {
   const f = await fixture(t, { config, includeQzone: false, temporaryDirectory, hostBoot,
+    preparePlugin: withoutCurrentSession ? async root => {
+      // Exercise the real QQ entry with a compatible host facade missing only the optional current-session API.
+      await writeFile(join(root, 'index.ts'), `import { apply as applyQQ } from './main.js';
+export function apply(ctx) {
+  if (ctx.channels.supportsActivePersona !== true || typeof ctx.sessions.current !== 'function')
+    throw Error('Expected the full host before removing the optional test capability');
+  const sessions = Object.create(ctx.sessions, { current: { value: undefined } });
+  return applyQQ({ ...ctx, sessions });
+}`);
+    } : undefined,
     ...(observe ? { prepareHost: async (root: string) => {
       const dir = join(root, 'plugins/continuation-observer'); await mkdir(dir, { recursive: true });
       await writeFile(join(dir, 'plugin.yaml'), 'id: continuation-observer\nname: Continuation observer\nversion: 1.0.0\ndescription: Isolated optional consumer\noptionalDepends: [qq]\n');
@@ -54,14 +64,14 @@ async function make(t: TestContext, observe = false) {
     } } : {}),
   });
   await f.online();
-  // The frozen minimum predates Web's current-session API. Establish its normal
-  // legacy route through a public, synthetic send and then reset test counters.
-  const sessionId = typeof f.app.sessions.current === 'function' ? await f.app.sessions.current()
+  // Without a current-session API, a synthetic send establishes the direct route.
+  const supportsCurrent = !withoutCurrentSession && typeof f.app.sessions.current === 'function';
+  const sessionId = supportsCurrent ? await f.app.sessions.current()
     : (await service(f).sendText({ userId: '200002', messageId: 'fixture-route-setup', text: '隔离渠道准备' })).sessionId;
   assert.equal(typeof sessionId, 'string');
   f.calls.length = 0; f.generations.length = 0;
   assert.equal(service(f).textDeliveryApiVersion, '1.0.0');
-  assert.equal(service(f).textDeliveryResumeSupported, typeof f.app.sessions.current === 'function');
+  assert.equal(service(f).textDeliveryResumeSupported, supportsCurrent);
   f.setGenerate(async () => ({ text, toolCalls: [], usage: { prompt_tokens: 1, completion_tokens: 3 } }));
   return { f, sessionId };
 }
@@ -229,11 +239,9 @@ test('optional consumer receives metadata notifications and survives provider st
   assert.equal(f.generations.length, 1);
 });
 
-test('frozen host retains normal delivery and inspectable interruptions but explicitly blocks continuation', { timeout: 20000 }, async t => {
-  const { f, sessionId } = await make(t);
-  if (service(f).textDeliveryResumeSupported) {
-    t.skip('Current host supports continuation; this case checks the frozen minimum capability boundary.'); return;
-  }
+test('active-persona host without current-session capability retains interruptions and blocks continuation after reload', { timeout: 20000 }, async t => {
+  const { f, sessionId } = await make(t, false, true);
+  assert.equal(service(f).textDeliveryResumeSupported, false);
   const item = await interruptAfterFirst(f, sessionId);
   assert.equal(item.canResume, false); assert.equal(item.blockedReason, 'host_blocked');
   const result = await service(f).resumeTextDelivery(key(item), options());

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import sharp from 'sharp';
-import { fixture, until } from './fixture.ts';
+import { fixture, selectOnWeb, until } from './fixture.ts';
 
 test('synced installation loads with no private config, stays offline, and can stop/start independently', { timeout: 20000 }, async t => {
   const f = await fixture(t, { unconfigured: true, packagePath: process.env.QQ_INSTALLED_PACKAGE });
@@ -39,7 +39,7 @@ test('packaged plugin: authenticated settings, private conversation, source owne
   await f.app.runtime.action('qq', 'reload'); await f.online(); f.send();
   await until(async () => (await f.status()).recent.length > 0);
   assert.equal(f.generations.length, 1); assert.equal(f.calls.filter(c => c.action === 'send_private_msg').length, 1);
-  assert.equal((await f.save({ personaId: 'b' })).status, 200); await f.online(); f.send({ message_id: 2 });
+  await selectOnWeb(f, 'b'); f.send({ message_id: 2, persona: 'a', sessionId: 'other', permission: 'full' });
   await until(() => f.generations.length === 2);
   await until(async () => (await f.status()).recent.some((n: any) => n.status === 'sent'));
   assert.deepEqual((await sessions()).map((s: any) => s.id), [sessionId]);
@@ -54,7 +54,7 @@ test('settings reject bad/stale config without killing plugin; v0 migrates witho
   const before = await (await f.request('/plugins/qq/config')).json();
   assert.equal((await f.save({ permission: 'evil' })).status, 400);
   assert.equal((await f.save({ wsUrl: 'wss://different.example/' })).status, 400);
-  assert.equal((await f.save({ personaId: 'b' })).status, 200);
+  assert.equal((await f.save({ minReplyIntervalMs: 200 })).status, 200);
   assert.equal((await f.request('/plugins/qq/config', { revision: before.revision, config: before.config })).status, 409);
   assert.equal(f.app.runtime.records.get('qq')?.status, 'active');
   assert.equal(await f.app.runtime.services.get('witness')!.value.ping(), 'alive');

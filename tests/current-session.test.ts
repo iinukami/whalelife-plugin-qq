@@ -1,13 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFile, mkdir, symlink } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { readFile, writeFile, symlink, unlink } from 'node:fs/promises';
+import { join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { temporaryDirectory } from '../../whalelife/tests/temporary-directory.ts';
 import { fixture, until } from './fixture.ts';
-import { desktopConnection } from './desktop-fixture.ts';
-import { segmentationDefaults } from '../src/config.ts';
 
 const sent = (f: Awaited<ReturnType<typeof fixture>>, id: string) => until(async () =>
   (await f.status()).recent.some((n: any) => n.messageId === id && n.status === 'sent'));
@@ -95,62 +93,34 @@ test('Web switch during a reply leaves that reply in place; next message and dir
   assert.equal(f.generations.length, 2);
 });
 
-test('current plugin runs unchanged on actual 213b52b host with legacy independent sessions', async t => {
+test('a host predating active channel personas blocks QQ before connecting even with a legacy fixed persona', async t => {
   const root = await temporaryDirectory('whale-qq-legacy-host-');
-  const host = new URL('../../whalelife', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1');
-  const names = execFileSync('git', ['ls-tree', '-r', '--name-only', '213b52b', '--', 'core', 'package.json'], { cwd: host, encoding: 'utf8' }).trim().split('\n');
-  for (const name of names) {
-    const path = join(root, name); await mkdir(dirname(path), { recursive: true });
-    await writeFile(path, execFileSync('git', ['show', '213b52b:' + name], { cwd: host }));
-  }
-  await symlink(join(host, 'node_modules'), join(root, 'node_modules'), 'junction');
+  const host = fileURLToPath(new URL('../../whalelife', import.meta.url));
+  const git = ['-c', 'safe.directory=' + host.replaceAll('\\', '/'), '-C', host];
+  const commit = execFileSync('git', [...git, 'rev-parse', 'refs/tags/213b52b^{commit}'], { encoding: 'utf8' }).trim();
+  assert.equal(commit, '7c8e3898b2bc7cb0b892eb0ab2feec0ca9c8aaf0');
+  const archive = join(root, 'host.tar');
+  execFileSync('git', [...git, 'archive', '--format=tar', '--output=' + archive, commit, 'core', 'package.json']);
+  execFileSync('tar', ['-xf', archive, '-C', root]);
+  const deps = join(root, 'node_modules');
+  await symlink(join(host, 'node_modules'), deps, 'junction');
+  t.after(() => unlink(deps));
   const { boot } = await import(pathToFileURL(join(root, 'core/index.ts')).href);
-  const f = await fixture(t, { hostBoot: boot, config: { mediaHosts: ['qq.com', 'qpic.cn', 'gtimg.cn', 'gtimg.com'] } }); await f.online();
-  const existingSocket = f.socket();
-  const unavailable = await f.save({ personaId: '' });
-  assert.equal(unavailable.status, 400);
-  assert.match((await unavailable.json()).error, /跟随主干/);
-  assert.equal((await f.configFile()).personaId, 'a');
-  assert.equal(f.socket(), existingSocket);
-  assert.equal(f.connects(), 1);
-  assert.ok((await f.configFile()).mediaHosts.includes('multimedia.nt.qq.com.cn'));
+  const f = await fixture(t, { hostBoot: boot, includeQzone: false, preparePlugin: async dir => {
+    const file = join(dir, 'data', 'config.json');
+    const config = JSON.parse(await readFile(file, 'utf8'));
+    await writeFile(file, JSON.stringify({ ...config, personaId: 'b' }));
+  } });
+  const state = await f.status();
+  assert.notEqual(state.state, 'online');
+  assert.match(state.error, /升级/);
+  assert.doesNotMatch(state.error, /选择固定人格/);
+  const settings = await (await f.request('/plugins/qq/config')).json();
+  assert.equal(Object.hasOwn(settings.config, 'personaId'), false);
+  assert.equal((await f.save({ enabled: true })).status, 400);
+  assert.equal((await f.save({ enabled: true, personaId: 'a' })).status, 400);
+  assert.equal(f.generations.length, 0);
+  assert.equal(f.connects(), 0);
   assert.deepEqual(await f.app.memory.listSessionMeta(), {});
-  f.send(); await sent(f, '1');
-  const id = Object.keys(await f.app.memory.listSessionMeta())[0]; assert.match(id, /^ch_/);
-  await f.app.runtime.action('qq', 'reload'); await f.online(); f.send(); await sent(f, '1');
-  assert.equal(f.generations.length, 1);
   assert.equal(await f.app.runtime.services.get('witness')!.value.ping(), 'alive');
-  await f.save({ permission: 'full' }); await f.online();
-  const modelSend = await f.app.tools.call('qq_send_message',
-    { userId: '200002', messageId: 'legacy-tool', text: '旧宿主模型工具发送' }, { id, permission: 'full' });
-  assert.equal(modelSend.result.status, 'sent'); assert.equal(modelSend.result.sessionId, id);
-  assert.equal((await f.app.tools.call('qq_send_message',
-    { userId: '200002', messageId: 'legacy-tool', text: '旧宿主模型工具发送' }, { id, permission: 'full' })).result.duplicate, true);
-  let ackRound = 0;
-  f.setGenerate(async () => ++ackRound === 1 ? { text: '', toolCalls: [{ id: 'legacy-ack', name: 'qq_acknowledge', arguments: JSON.stringify({ text: '旧宿主先接话。' }) }] }
-    : { text: '旧宿主处理完成。', toolCalls: [] });
-  f.send({ message_id: 2 }); await sent(f, '2');
-  assert.deepEqual(f.calls.filter(c => c.action === 'send_private_msg').slice(-2).map(c => c.params.message[0].data.text), ['旧宿主先接话。', '旧宿主处理完成。']);
-  const desktop = await fixture(t, { hostBoot: boot, config: { connectionMode: 'desktop' }, preparePlugin: desktopConnection });
-  await desktop.online(); desktop.send(); await sent(desktop, '1');
-  await desktop.app.runtime.action('qq', 'stop'); await until(() => desktop.socket().readyState === 3);
-  await desktop.app.runtime.action('qq', 'start'); await desktop.online(); desktop.send(); await sent(desktop, '1');
-  assert.equal(desktop.generations.length, 1);
-  await desktop.save({ segmentedReply: { ...segmentationDefaults, enabled: true, interval: '0,0' } }); await desktop.online();
-  desktop.setGenerate(async () => ({ text: '旧主干。也分段！', toolCalls: [] }));
-  desktop.send({ message_id: 2 }); await sent(desktop, '2');
-  assert.deepEqual(desktop.calls.filter(c => c.action === 'send_private_msg').slice(-2).map(c => c.params.message[0].data.text), ['旧主干。', '也分段！']);
-  desktop.setAction((data, socket) => {
-    if (data.action !== 'send_private_msg') return false;
-    socket.send(JSON.stringify({ echo: data.echo, status: 'failed', retcode: 1200, data: {} })); return true;
-  });
-  desktop.send({ message_id: 3 }); await until(async () => (await desktop.status()).recent.some((n: any) => n.messageId === '3' && n.status === 'delivery_failed'));
-  const legacyId = Object.keys(await desktop.app.memory.listSessionMeta())[0];
-  assert.ok((await desktop.app.memoryEngine.state(legacyId)).records.some((r: any) => r.source === 'qq' && /自动回复投递结果.*结果未知/.test(r.text)));
-  assert.equal(modelSend.result.delivery.outcome, 'sent');
-  const service = f.app.runtime.services.get('qq')!.value;
-  assert.equal(service.qzoneReferenceApiVersion, '1.0.0');
-  assert.equal(service.qzoneVideoApiVersion, '1.0.0');
-  await assert.rejects(service.qzoneReadVideo({ sessionId: id, ref: 'invalid', index: 0 }, { signal: new AbortController().signal }), /动态引用/);
-  assert.equal((await service.qzoneReferenceStatus({ sessionId: id, ref: 'invalid' }, { signal: new AbortController().signal })).reason, 'invalid_reference');
 });

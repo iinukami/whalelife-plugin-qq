@@ -3,11 +3,11 @@
  * Additional terms under AGPLv3 Section 7: see LICENSE-ADDITIONAL.
  */
 import assert from 'node:assert/strict';
-import { writeFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import test from 'node:test';
-import { fixture, until } from './fixture.ts';
+import { fixture, selectOnWeb, until } from './fixture.ts';
 import { temporaryDirectory } from './temporary-directory.ts';
 
 const hostPath = process.env.QQ_PERSONA_HOST_PATH;
@@ -20,28 +20,17 @@ async function preparePersonas(root: string) {
     await writeFile(join(root, id + '.md'), marker);
 }
 
-async function selectOnWeb(f: Awaited<ReturnType<typeof fixture>>, id: 'a' | 'b') {
-  const current = await (await f.request('/api/model-config')).json();
-  const saved = await f.request('/api/model-config', {
-    revision: current.revision, timezone: current.timezone, activePersona: id,
-    models: current.models, providers: current.providers, bindings: current.bindings,
-    personaModels: Object.fromEntries(current.personas.map((p: { id: string; model?: string }) => [p.id, p.model || null])),
-  });
-  const updated = await saved.json();
-  assert.equal(saved.status, 200, JSON.stringify(updated));
-  assert.equal(updated.activePersona, id);
-}
-
-test('private QQ follows the active Web persona by default, supports pinning and keeps the same history', async t => {
+test('private QQ always follows the active Web persona and keeps the same history', async t => {
   const f = await fixture(t, {
     hostBoot, temporaryDirectory,
     includeQzone: false,
-    config: { personaId: undefined }, // Omit this field from a newly configured installation.
     prepareHost: preparePersonas,
   });
   await f.online();
-  const qqConfig = async () => (await (await f.request('/plugins/qq/config')).json()).config;
-  assert.equal((await qqConfig()).personaId, '');
+  const settings = await (await f.request('/plugins/qq/config')).json();
+  assert.equal(Object.hasOwn(settings.config, 'personaId'), false);
+  assert.equal(Object.hasOwn(settings, 'personas'), false);
+  assert.doesNotMatch(await (await f.request('/plugins/qq/settings')).text(), /id=["']personaId["']/);
   const sessionId = await f.app.sessions.create('Synthetic shared conversation');
   assert.equal((await f.request('/api/session/current', { id: sessionId })).status, 200);
   const previous = 'Existing Web conversation marker';
@@ -73,41 +62,43 @@ test('private QQ follows the active Web persona by default, supports pinning and
   await selectOnWeb(f, 'b'); await turn('b');
   assert.equal(f.socket(), initialSocket);
   assert.equal(f.connects(), 1);
-  assert.equal((await qqConfig()).personaId, '');
-
-  assert.equal((await f.save({ personaId: 'a' })).status, 200); await f.online();
-  await turn('a');
-  const pinnedSocket = f.socket();
-  await selectOnWeb(f, 'a'); await selectOnWeb(f, 'b'); await turn('a');
-  assert.equal(f.socket(), pinnedSocket);
-  assert.equal((await qqConfig()).personaId, 'a');
-
-  assert.equal((await f.save({ personaId: '' })).status, 200); await f.online();
-  await turn('b');
-  const followingSocket = f.socket();
-  await selectOnWeb(f, 'a'); await turn('a');
-  assert.equal(f.socket(), followingSocket);
   assert.deepEqual(Object.keys(await f.app.memory.listSessionMeta()), [sessionId]);
   const history = await f.app.memory.readSession(sessionId);
   assert.deepEqual(history.filter((row: any) => row.role === 'user').map((row: any) => row.text),
     [previous, ...Array.from({ length: seq }, (_, i) => 'Synthetic incoming ' + (i + 1))]);
 });
 
-test('private QQ preserves an existing explicit persona when Web selects another', async t => {
-  const f = await fixture(t, { hostBoot, temporaryDirectory, includeQzone: false, config: { personaId: 'b' },
-    prepareHost: root => writeFile(join(root, 'b.md'), 'PREVIOUSLY_PINNED_PERSONA') });
+test('an old QQ persona setting is ignored from the first message and on subsequent Web selection', async t => {
+  const f = await fixture(t, { hostBoot, temporaryDirectory, includeQzone: false, prepareHost: preparePersonas,
+    preparePlugin: async root => {
+      const file = join(root, 'data', 'config.json');
+      const previous = JSON.parse(await readFile(file, 'utf8'));
+      await writeFile(file, JSON.stringify({ ...previous, personaId: 'b' }));
+    },
+  });
   await f.online();
   assert.equal((await (await f.request('/api/model-config')).json()).activePersona, 'a');
-  f.send({ message_id: 1 });
-  await until(async () => (await f.status()).recent.some((row: any) => row.messageId === '1' && row.status === 'sent'));
-  assert.ok(JSON.stringify(f.generations[0].messages.filter((m: any) => m.role === 'system')).includes('PREVIOUSLY_PINNED_PERSONA'));
-  const history = await f.app.memory.readSession(await f.app.sessions.current());
-  assert.equal(history.find((row: any) => row.role === 'user')?.persona_id, 'b');
-  assert.equal((await f.configFile()).personaId, 'b');
+  assert.equal(Object.hasOwn((await (await f.request('/plugins/qq/config')).json()).config, 'personaId'), false);
+  const first = f.socket();
+  const turn = async (messageId: number) => {
+    f.send({ message_id: messageId });
+    await until(async () => (await f.status()).recent.some((r: any) => r.messageId === String(messageId) && r.status === 'sent'));
+  };
+  await turn(1);
+  await selectOnWeb(f, 'b');
+  await turn(2);
+  const sessionId = await f.app.sessions.current();
+  const history = await f.app.memory.readSession(sessionId);
+  assert.deepEqual(history.filter((r: any) => r.role === 'user').map((r: any) => r.persona_id), ['a', 'b']);
+  assert.deepEqual(history.filter((r: any) => r.role === 'assistant').map((r: any) => r.persona_id), ['a', 'b']);
+  assert.deepEqual(f.generations.map(g => Object.keys(markers).filter(id =>
+    JSON.stringify(g.messages.filter((m: any) => m.role === 'system')).includes(markers[id as keyof typeof markers]))), [['a'], ['b']]);
+  assert.deepEqual(Object.keys(await f.app.memory.listSessionMeta()), [sessionId]);
+  assert.equal(f.socket(), first);
 });
 
 test('Web persona switch during an open QQ turn lets it finish and sends the next message as the new persona', async t => {
-  const f = await fixture(t, { hostBoot, temporaryDirectory, includeQzone: false, config: { personaId: undefined }, prepareHost: preparePersonas });
+  const f = await fixture(t, { hostBoot, temporaryDirectory, includeQzone: false, prepareHost: preparePersonas });
   await f.online();
   const sessionId = await f.app.sessions.current();
   const socket = f.socket();

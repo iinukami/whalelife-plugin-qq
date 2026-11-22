@@ -1,12 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { cp, mkdir, readFile, readdir, writeFile, symlink } from 'node:fs/promises';
+import { cp, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
-import { execFileSync } from 'node:child_process';
+import { baselineBoot, positiveBaselines } from './host-baseline.ts';
 import sharp from 'sharp';
-import { temporaryDirectory } from '../../whalelife/tests/temporary-directory.ts';
 import { fixture, until } from './fixture.ts';
 import { segmentationDefaults } from '../src/config.ts';
 
@@ -48,15 +46,8 @@ async function setup(t: Parameters<typeof fixture>[0], options: Parameters<typeo
   return { f, sessionId, gallery, png, gif, ids, call, status };
 }
 
-for (const baseline of ['current', '213b52b']) test(`real gallery → QQ on ${baseline}: ordered images/text, GIF bytes, real receipts, public history, duplicates and reload`, { timeout: 40000 }, async t => {
-  let hostBoot;
-  if (baseline !== 'current') {
-    const dir = await temporaryDirectory('whale-qq-gallery-send-host-');
-    execFileSync('git', ['-C', new URL('../../whalelife', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'), 'archive', '--format=tar', '--output=' + join(dir, 'host.tar'), baseline, 'core', 'package.json']);
-    execFileSync('tar', ['-xf', join(dir, 'host.tar'), '-C', dir]);
-    await symlink(new URL('../../whalelife/node_modules', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'), join(dir, 'node_modules'), 'junction');
-    hostBoot = (await import(pathToFileURL(join(dir, 'core/index.ts')).href)).boot;
-  }
+for (const baseline of positiveBaselines) test(`real gallery → QQ on ${baseline}: ordered images/text, GIF bytes, real receipts, public history, duplicates and reload`, { timeout: 40000 }, async t => {
+  const hostBoot = await baselineBoot(baseline);
   const { f, sessionId, png, gif, ids, call, status } = await setup(t, { hostBoot });
   const parts = [{ type: 'text', text: '开头。' }, { type: 'image', id: ids[1] }, { type: 'text', text: '中间。继续。' }, { type: 'image', id: ids[0] }, { type: 'text', text: '结尾。' }];
   const r = await call({ parts }); assert.equal(r.status, 'sent'); assert.equal(r.confirmed, true); assert.equal(r.parts.length, 6);

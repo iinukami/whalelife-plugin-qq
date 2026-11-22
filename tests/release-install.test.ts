@@ -15,7 +15,12 @@ const { fileInventory } = await import(new URL('../scripts/vendor-package.mjs', 
 type Build = { name: string; version: string; mode: 'desktop' | 'external'; platform: string; files: Record<string, string> };
 const packagePath = resolve(process.env.QQ_RELEASE_TEST_PACKAGE ?? fileURLToPath(new URL('../dist/qq', import.meta.url)));
 const sourceHost = fileURLToPath(new URL('../../whalelife', import.meta.url));
-const expectedMinimum = '7c8e3898b2bc7cb0b892eb0ab2feec0ca9c8aaf0';
+const baselines = [
+  { name: 'current', ref: 'HEAD', supported: true },
+  { name: 'first active-persona host', ref: 'eb229985f59a12c82b326da0bc114b0bd55b3390', supported: true },
+  { name: 'released v0.1.2', ref: 'refs/tags/v0.1.2^{commit}', expected: '7e7a5cb398c1b77c5970043bfb0ce809cfb5f790', supported: false },
+  { name: 'former minimum', ref: 'refs/tags/213b52b^{commit}', expected: '7c8e3898b2bc7cb0b892eb0ab2feec0ca9c8aaf0', supported: false },
+] as const;
 
 async function verifyRelease(root: string): Promise<Build> {
   const actual: Record<string, string> = await fileInventory(root);
@@ -36,12 +41,11 @@ async function verifyRelease(root: string): Promise<Build> {
   return build;
 }
 
-async function snapshotHost(t: TestContext, baseline: 'current' | 'minimum') {
+async function snapshotHost(t: TestContext, baseline: typeof baselines[number]) {
   const root = await temporaryDirectory('whale-release-host-');
   const gitArgs = ['-c', `safe.directory=${sourceHost.replaceAll('\\', '/')}`, '-C', sourceHost];
-  const ref = baseline === 'current' ? 'HEAD' : 'refs/tags/213b52b^{commit}';
-  const commit = execFileSync('git', [...gitArgs, 'rev-parse', ref], { encoding: 'utf8' }).trim();
-  if (baseline === 'minimum') assert.equal(commit, expectedMinimum, 'Frozen minimum host must not move');
+  const commit = execFileSync('git', [...gitArgs, 'rev-parse', baseline.ref], { encoding: 'utf8' }).trim();
+  if ('expected' in baseline) assert.equal(commit, baseline.expected, 'Frozen host tag must not move');
   assert.match(commit, /^[a-f0-9]{40}$/);
   // Newer hosts load their bundled catalogs during import; the frozen minimum predates them.
   const hostFiles = execFileSync('git', [...gitArgs, 'ls-tree', '--name-only', commit, '--',
@@ -49,7 +53,7 @@ async function snapshotHost(t: TestContext, baseline: 'current' | 'minimum') {
   execFileSync('git', [...gitArgs, 'archive', '--format=tar', '--output=' + join(root, 'host.tar'), commit, ...hostFiles]);
   execFileSync('tar', ['-xf', join(root, 'host.tar'), '-C', root]);
   await symlink(join(sourceHost, 'node_modules'), join(root, 'node_modules'), 'junction');
-  t.diagnostic(`Release installation host ${baseline}: ${commit}`);
+  t.diagnostic(`Release installation host ${baseline.name}: ${commit}`);
   return (await import(pathToFileURL(join(root, 'core/index.ts')).href)).boot;
 }
 
@@ -82,16 +86,23 @@ if (desktop) {
 console.log(JSON.stringify({ sharp: 'png-3x2', fridaVersion, bindingHash }));
 `;
 
-for (const baseline of ['current', 'minimum'] as const) test(`independent release installation on ${baseline}: complete package, native imports, receive/send and stop/start`,
+for (const baseline of baselines) test(`independent release installation on ${baseline.name}: ${baseline.supported ? 'follow the active persona on receive/send and restart' : 'require a host upgrade before QQ can connect'}`,
   { timeout: 180000 }, async t => {
     const release = await verifyRelease(packagePath);
     const hostBoot = await snapshotHost(t, baseline);
     const f = await fixture(t, { temporaryDirectory, hostBoot, packagePath, includeQzone: false, includeVendor: true,
       config: { galleryEnabled: false }, preparePlugin: async installed => {
+        // Preserve the shape of an actual 0.24 installation with a fixed persona.
+        const path = join(installed, 'data/config.json');
+        const legacy = JSON.parse(await readFile(path, 'utf8'));
+        await writeFile(path, JSON.stringify({ ...legacy, personaId: 'b' }));
         // The fixture has added only synthetic configuration. Verify the
         // installed release bytes before booting any plugin from this copy.
         const copied = await fileInventory(installed);
         for (const [name, hash] of Object.entries(release.files)) assert.equal(copied[name], hash, 'Installed byte differs: ' + name);
+      }, prepareHost: async root => {
+        await writeFile(join(root,'a.md'),'SYNTHETIC_RELEASE_ACTIVE_PERSONA');
+        await writeFile(join(root,'b.md'),'SYNTHETIC_RELEASE_OLD_FIXED_PERSONA');
       } });
     const installed = join(f.root, 'plugins/qq');
     assert.equal(f.app.runtime.records.has('qzone'), false);
@@ -110,6 +121,27 @@ for (const baseline of ['current', 'minimum'] as const) test(`independent releas
     assert.equal(native.bindingHash !== null, release.mode === 'desktop');
     t.diagnostic(`Release ${release.version} ${release.mode}: Sharp passed${native.fridaVersion ? ', Frida ' + native.fridaVersion + ' binding verified/imported' : ''}`);
 
+    if (!baseline.supported) {
+      const blocked = async () => {
+        const status = await f.status();
+        assert.notEqual(status.state, 'online');
+        assert.match(status.error, /升级|更新/);
+        assert.match(status.error, /人格/);
+        assert.equal(f.connects(), 0, 'The stored fixed persona must not start an unsupported QQ connection');
+      };
+      await blocked();
+      const attempted = await f.save({ enabled: true, personaId: 'b' });
+      assert.equal(attempted.ok, false);
+      assert.match(await attempted.text(), /升级|更新/);
+      await f.app.runtime.action('qq', 'stop');
+      await f.app.runtime.action('qq', 'start');
+      await blocked();
+      assert.equal(f.calls.length, 0);
+      assert.equal(f.generations.length, 0);
+      assert.equal(await f.app.runtime.services.get('witness')!.value.ping(), 'alive');
+      return;
+    }
+
     f.setGenerate(async () => ({ text: 'RELEASE_SMOKE_REPLY', toolCalls: [], usage: { prompt_tokens: 10, completion_tokens: 5 } }));
     await f.online();
     const sent = () => f.calls.filter(call => call.action === 'send_private_msg');
@@ -117,6 +149,9 @@ for (const baseline of ['current', 'minimum'] as const) test(`independent releas
     f.send({ message_id: 71001, message: [{ type: 'text', data: { text: 'SYNTHETIC_RELEASE_INPUT' } }] });
     await delivered('71001');
     assert.equal(f.generations.length, 1); assert.equal(sent().length, 1);
+    const system = JSON.stringify(f.generations[0].messages.filter((m: { role: string }) => m.role === 'system'));
+    assert.match(system, /SYNTHETIC_RELEASE_ACTIVE_PERSONA/);
+    assert.doesNotMatch(system, /SYNTHETIC_RELEASE_OLD_FIXED_PERSONA/);
     assert.equal(sent()[0].params.user_id, 200002);
     assert.deepEqual(sent()[0].params.message, [{ type: 'text', data: { text: 'RELEASE_SMOKE_REPLY' } }]);
     const socket = f.socket();

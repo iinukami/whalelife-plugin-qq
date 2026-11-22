@@ -1,11 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { cp, mkdir, readFile, writeFile, symlink } from 'node:fs/promises';
+import { cp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
-import { execFileSync } from 'node:child_process';
+import { baselineBoot, positiveBaselines } from './host-baseline.ts';
 import sharp from 'sharp';
-import { temporaryDirectory } from '../../whalelife/tests/temporary-directory.ts';
 import { fixture, until } from './fixture.ts';
 import { InboundMedia } from '../src/inbound-media.ts';
 
@@ -56,19 +54,13 @@ async function fakeGallery(root: string) {
   }`);
 }
 
-for (const baseline of ['current', '213b52b']) test(`QQ → real gallery on ${baseline}: original GIF/multiple images, model collection, scoped refs and reload deduplication`, { timeout: 45000 }, async t => {
-  let hostBoot;
-  if (baseline !== 'current') {
-    const dir = await temporaryDirectory('whale-qq-gallery-host-');
-    execFileSync('git', ['-C', new URL('../../whalelife', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'), 'archive', '--format=tar', '--output=' + join(dir, 'host.tar'), baseline, 'core', 'package.json']);
-    execFileSync('tar', ['-xf', join(dir, 'host.tar'), '-C', dir]);
-    await symlink(new URL('../../whalelife/node_modules', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'), join(dir, 'node_modules'), 'junction');
-    hostBoot = (await import(pathToFileURL(join(dir, 'core/index.ts')).href)).boot;
-  }
+for (const baseline of positiveBaselines) test(`QQ → real gallery on ${baseline}: original GIF/multiple images, model collection, scoped refs and reload deduplication`, { timeout: 45000 }, async t => {
+  const hostBoot = await baselineBoot(baseline);
   const f = await fixture(t, { hostBoot, config: { permission: 'full' }, prepareHost: realGallery });
   galleryModels(f); await f.online();
   await until(async () => (await f.status()).mediaBridge.active);
-  assert.equal(f.app.runtime.records.get('qq/gallery')?.status, baseline === 'current' ? undefined : 'active');
+  assert.equal((await f.status()).mediaBridge.mode, 'builtin');
+  assert.equal(f.app.runtime.records.has('qq/gallery'), false);
   const a = await png(), b = await gif(); assert.equal((await sharp(b).metadata()).pages, 2);
   let collected: any, turn = 0;
   f.setGenerate(async input => {

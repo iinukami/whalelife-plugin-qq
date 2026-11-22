@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { mkdir, writeFile, cp, readFile, access } from 'node:fs/promises';
@@ -65,7 +66,7 @@ export async function fixture(t: TestContext, options: { config?: Partial<Config
   if (options.includeQzone !== false && await access(spaceBuild).then(() => true, () => false)) await cp(spaceBuild, join(root, 'plugins/qq/sub/qzone'), { recursive: true });
   await mkdir(join(root, 'plugins/qq/data'));
   const config = { ...defaults, connectionMode: 'external', enabled: true, wsUrl, accessToken: 'fake-onebot-secret', accountId: '100001',
-    allowedUsers: ['200002'], personaId: 'a', visionModelId: 'vision', sttModelId: 'stt',
+    allowedUsers: ['200002'], visionModelId: 'vision', sttModelId: 'stt',
     minReplyIntervalMs: 0, requestTimeoutMs: 1000, reconnectMaxMs: 1000, mediaHosts: ['127.0.0.1'], ...options.config };
   if (!options.unconfigured) await writeFile(join(root, 'plugins/qq/data/config.json'), JSON.stringify(options.rawConfig ?? config));
   await options.preparePlugin?.(join(root, 'plugins/qq'));
@@ -103,4 +104,16 @@ export async function fixture(t: TestContext, options: { config?: Partial<Config
     setAction(fn: typeof action) { action = fn; }, setModelHandler(fn: typeof modelHandler) { modelHandler = fn; }, setGenerate(fn: typeof generate) { generate = fn; },
     async configFile() { return JSON.parse(await readFile(join(root, 'plugins/qq/data/config.json'), 'utf8')); },
   };
+}
+
+export async function selectOnWeb(f: Awaited<ReturnType<typeof fixture>>, id: 'a' | 'b') {
+  const current = await (await f.request('/api/model-config')).json();
+  const saved = await f.request('/api/model-config', {
+    revision: current.revision, timezone: current.timezone, activePersona: id,
+    models: current.models, providers: current.providers, bindings: current.bindings,
+    personaModels: Object.fromEntries(current.personas.map((p: { id: string; model?: string }) => [p.id, p.model || null])),
+  });
+  const updated = await saved.json();
+  assert.equal(saved.status, 200, JSON.stringify(updated));
+  assert.equal(updated.activePersona, id);
 }
