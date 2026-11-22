@@ -25,7 +25,8 @@ function nativeArk() {
     title: '哔哩哔哩', desc: input.title, qqdocurl: input.webUrl,
     url: 'm.q.qq.com/a/s/' + 'a'.repeat(32), preview: 'https://qq.ugcimg.cn/v1/synthetic-preview' } } };
 }
-function fixture() {
+function fixture(readSelectedPersona?: () => Promise<string>) {
+  const personas: string[] = [];
   const files = new Map<string, unknown>(), experiences: any[] = [], generated: any[] = [], sent: string[] = [];
   let saveHook: ((value: any) => void) | undefined, sessionHook: (() => void) | undefined;
   let generateHook: (() => Promise<any> | any) | undefined, sendHook: (() => Promise<string> | string) | undefined;
@@ -33,16 +34,16 @@ function fixture() {
   const ctx = {
     config: { read: async (name: string) => structuredClone(files.get(name) ?? {}),
       save: async (name: string, value: unknown) => { saveHook?.(value); files.set(name, structuredClone(value)); } },
-    sessions: { list: async () => [{ id: 'session-a' }], context: async (sessionId: string, persona: string) => { sessionHook?.(); assert.equal(persona, 'a'); if (sessionId !== 'session-a') throw Error('private missing session'); return {}; } },
+    sessions: { list: async () => [{ id: 'session-a' }], context: async (sessionId: string, persona: string) => { sessionHook?.(); personas.push(persona); assert.ok(persona, 'expected concrete persona'); if (sessionId !== 'session-a') throw Error('private missing session'); return {}; } },
     memory: { recordExperience: async (_session: string, value: any) => { experiences.push(value); } },
   } as unknown as Context;
   const create = () => new OutboundMiniApp(ctx, config, async params => {
     generated.push(params); return generateHook ? generateHook() : { data: ark() };
   }, async (_userId, payload, _signal, pending, dispatched) => {
     await pending(); dispatched(); sent.push(payload); return sendHook ? sendHook() : '9001';
-  });
+  }, undefined, readSelectedPersona);
   const controller = new AbortController(); let service = create();
-  return { files, experiences, generated, sent, controller, config,
+  return { files, experiences, generated, sent, controller, config, personas,
     run: (patch: Partial<MiniAppShare> = {}, options: any = { permission: 'full' }, guard = async () => {}, close = async () => {}) => service.execute({ ...input, ...patch }, options, controller.signal, guard, close),
     status: () => service.status({ userId: input.userId, actionId: input.actionId, sessionId: input.sessionId }, controller.signal),
     reload: () => { service = create(); },
@@ -62,6 +63,26 @@ test('signed mini-app preserves full QQ payload, hashes private fields, confirms
   assert.equal(f.sent.length, 1); assert.equal(f.generated.length, 1); assert.equal(f.experiences.length, 1);
   const durable = JSON.stringify([...f.files, ...f.experiences]);
   for (const secret of [input.title, input.description, input.previewUrl, input.webUrl, input.jumpPath, 'synthetic-signature', 'synthetic-host', input.userId, input.sessionId]) assert.ok(!durable.includes(secret), secret);
+});
+
+test('mini-app uses one persona per send and looks up duplicate receipts independently of the host selection', async () => {
+  let selected = 'host-a', reads = 0;
+  const f = fixture(async () => { reads++; if (!selected) throw Error('no selection'); return selected; });
+  f.config.personaId = '';
+  assert.equal((await f.status()).status, 'not_found');
+  f.generate(() => { selected = 'host-b'; return { data: ark() }; });
+  assert.equal((await f.run({ personaId: undefined })).confirmed, true);
+  assert.deepEqual(f.personas, ['host-a', 'host-a']);
+  f.reload(); selected = '';
+  assert.equal((await f.status()).confirmed, true);
+  assert.equal((await f.run({ personaId: undefined })).duplicate, true);
+  assert.equal((await f.run({ personaId: 'host-a' })).error, 'conflict');
+  assert.equal(f.sent.length, 1);
+  assert.equal((await f.run({ actionId: 'caller', personaId: 'caller' })).confirmed, true);
+  f.config.personaId = 'pinned';
+  assert.equal((await f.run({ actionId: 'fixed', personaId: undefined })).confirmed, true);
+  assert.deepEqual(f.personas, ['host-a', 'host-a', 'caller', 'caller', 'pinned', 'pinned']);
+  assert.equal(reads, 1);
 });
 
 test('permissions, recipient, session and unstructured/unsafe content fail before protocol calls', async () => {

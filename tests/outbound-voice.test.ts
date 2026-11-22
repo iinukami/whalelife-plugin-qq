@@ -36,16 +36,16 @@ function voice(bytes = pcmWav()) {
     base64: bytes.toString('base64') };
 }
 
-function fixture(options: { afterPending?: QQError; permission?: 'off' | 'full'; maxMediaBytes?: number } = {}) {
+function fixture(options: { afterPending?: QQError; permission?: 'off' | 'full'; maxMediaBytes?: number; readSelectedPersona?: () => Promise<string> } = {}) {
   const records = new Map<string, unknown>();
   const experiences: unknown[] = [];
-  const frames: unknown[][] = [];
+  const frames: unknown[][] = [], personas: string[] = [];
   const ctx = {
     config: {
       read: async (file: string) => structuredClone(records.get(file) ?? {}),
       save: async (file: string, value: unknown) => { records.set(file, structuredClone(value)); },
     },
-    sessions: { context: async () => ({}) },
+    sessions: { context: async (sessionId: string, persona: string) => { assert.equal(sessionId, key.sessionId); personas.push(persona); return {}; } },
     memory: { recordExperience: async (_sessionId: string, event: unknown) => { experiences.push(event); } },
   } as unknown as Context;
   const config = parseConfig({ accountId: '100001', allowedUsers: [key.userId],
@@ -56,8 +56,8 @@ function fixture(options: { afterPending?: QQError; permission?: 'off' | 'full';
     frames.push(message);
     if (options.afterPending) throw options.afterPending;
     return '7101';
-  });
-  return { open, records, experiences, frames };
+  }, options.readSelectedPersona);
+  return { open, records, experiences, frames, personas };
 }
 
 test('a standalone WAV is sent as one native record, confirmed once and not persisted as audio', async () => {
@@ -79,6 +79,22 @@ test('a standalone WAV is sent as one native record, confirmed once and not pers
   await assert.rejects(reopened.execute({ ...key, parts: [voice(changed)] }, signal));
   assert.equal(f.frames.length, 1);
   assert.equal(JSON.stringify([[...f.records.values()], f.experiences, receipt]).includes(part.base64), false);
+});
+
+test('private media pins the selected persona on first attempt and reuses it on explicit retry', async () => {
+  let selection = 'host-a', reads = 0;
+  const options = { afterPending: new QQError('offline', 'not submitted', true) as QQError | undefined,
+    readSelectedPersona: async () => { reads++; return selection; } };
+  const f = fixture(options), input = { ...key, parts: [voice()] };
+  assert.equal((await f.open().execute(input, signal)).status, 'failed');
+  options.afterPending = undefined; selection = 'host-b';
+  assert.equal((await f.open().execute({ ...input, personaId: 'caller' }, signal, true)).status, 'sent');
+  assert.equal((await f.open().status(key)).confirmed, true);
+  assert.equal((await f.open().execute(input, signal, true)).duplicate, true);
+  assert.equal((await f.open().execute({ ...input, actionId: 'next' }, signal)).confirmed, true);
+  assert.equal((await f.open().execute({ ...input, actionId: 'override', personaId: 'caller' }, signal)).confirmed, true);
+  assert.deepEqual(f.personas, ['host-a', 'host-a', 'host-b', 'caller']);
+  assert.equal(reads, 2);
 });
 
 for (const code of ['timeout', 'invalid_id', 'platform_failed']) test(`a submitted voice with ${code} stays uncertain across reopening and explicit retry`, async () => {

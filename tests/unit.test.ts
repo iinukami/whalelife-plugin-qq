@@ -14,6 +14,16 @@ test('configuration is offline by default, validates credentials/identity and mi
   const migrated = parseConfig({ schemaVersion: 0, url: 'ws://localhost:3001/', token: 'SECRET', selfId: '100001', allowUsers: ['200002'], persona: 'a' });
   assert.equal(migrated.schemaVersion, 3); assert.equal(migrated.connectionMode, 'external'); assert.equal(migrated.accountId, '100001'); assert.equal(migrated.accessToken, 'SECRET');
   assert.ok(!JSON.stringify(publicConfig(migrated)).includes('SECRET'));
+  assert.equal(migrated.personaId, 'a');
+});
+test('enabled QQ follows the host when personaId is omitted or cleared and preserves explicit choices', () => {
+  const base = { enabled: true, connectionMode: 'desktop', accountId: '100001', allowedUsers: ['200002'] };
+  assert.equal(parseConfig(base).personaId, '');
+  for (const schemaVersion of [1, 2, 3]) {
+    const pinned = parseConfig({ ...base, schemaVersion, personaId: 'chosen' });
+    assert.equal(publicConfig(pinned).personaId, 'chosen');
+    assert.equal(parseConfig({ ...pinned, personaId: '' }).personaId, '');
+  }
 });
 test('video share format defaults to cards for old configs and accepts only explicit supported formats', () => {
   assert.equal(defaults.videoShareFormat, 'card');

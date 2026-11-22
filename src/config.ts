@@ -139,11 +139,14 @@ export function parseConfig(input: unknown): Config {
     if (url.protocol === 'ws:' && !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname))
       throw new QQError('config', '非本机协议端必须使用 wss。');
   }
-  if (cfg.enabled && (!cfg.personaId || !cfg.allowedUsers.length || (!['managed', 'attach'].includes(cfg.connectionMode) && !cfg.accountId) || (cfg.connectionMode === 'external' && !cfg.wsUrl)))
-    throw new QQError('config', '连接前请填写机器人 QQ 号、人格和私聊白名单；外部模式还需要协议端地址。');
+  if (cfg.enabled && (!cfg.allowedUsers.length || (!['managed', 'attach'].includes(cfg.connectionMode) && !cfg.accountId) || (cfg.connectionMode === 'external' && !cfg.wsUrl)))
+    throw new QQError('config', '连接前请填写私聊白名单。桌面和外部模式需要机器人 QQ 号，外部模式还需要协议端地址。');
   return cfg;
 }
 export function validateSelections(ctx: Context, config: Config) {
+  if (config.enabled && !config.personaId &&
+    (!('supportsActivePersona' in ctx.channels) || ctx.channels.supportsActivePersona !== true))
+    throw new QQError('persona', '当前宿主尚不支持跟随主干人格。请升级 WhaleLife，或在 QQ 设置中选择固定人格。');
   if (config.personaId && !ctx.personas.list().some(p => p.id === config.personaId))
     throw new QQError('persona', '所选人格不可用。');
   for (const [key, types] of [['visionModelId', ['chat', 'custom']], ['sttModelId', ['stt']]] as const) {

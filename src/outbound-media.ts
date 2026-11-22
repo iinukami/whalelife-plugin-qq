@@ -85,7 +85,10 @@ export class OutboundMedia {
   private ctx: Context;
   private config: Config;
   private send: (userId: string, message: unknown[], interval: number, signal: AbortSignal, markPending: () => Promise<void>) => Promise<string>;
-  constructor(ctx: Context, config: Config, send: OutboundMedia['send']) { this.ctx = ctx; this.config = config; this.send = send; }
+  private readSelectedPersona: () => string | Promise<string>;
+  constructor(ctx: Context, config: Config, send: OutboundMedia['send'], readSelectedPersona: () => string | Promise<string> = () => config.personaId) {
+    this.ctx = ctx; this.config = config; this.send = send; this.readSelectedPersona = readSelectedPersona;
+  }
   private async read(key: MediaKey) {
     const { userId, deliveryId } = mediaKey(key, this.config), file = `media-delivery-${digest(deliveryId)}.json`;
     const raw = await this.ctx.config.read<Partial<Ledger>>(file);
@@ -151,7 +154,7 @@ export class OutboundMedia {
     const fingerprint = digest(canonical);
     if (previous && previous.fingerprint !== fingerprint) throw new QQError('delivery_conflict', '同一动作 ID 的媒体内容不同，未发送。');
     if (previous && (!retry || previous.receipts.some(p => p.state === 'pending') || previous.status === 'sent')) return result(previous, true);
-    const personaId = previous?.personaId ?? input.personaId ?? this.config.personaId;
+    const personaId = previous?.personaId ?? input.personaId ?? (this.config.personaId || await this.readSelectedPersona());
     // Validate the trusted session without moving a channel binding or changing Web selection.
     await this.ctx.sessions.context(input.sessionId, personaId);
     signal.throwIfAborted();

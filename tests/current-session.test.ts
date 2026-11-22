@@ -106,6 +106,13 @@ test('current plugin runs unchanged on actual 213b52b host with legacy independe
   await symlink(join(host, 'node_modules'), join(root, 'node_modules'), 'junction');
   const { boot } = await import(pathToFileURL(join(root, 'core/index.ts')).href);
   const f = await fixture(t, { hostBoot: boot, config: { mediaHosts: ['qq.com', 'qpic.cn', 'gtimg.cn', 'gtimg.com'] } }); await f.online();
+  const existingSocket = f.socket();
+  const unavailable = await f.save({ personaId: '' });
+  assert.equal(unavailable.status, 400);
+  assert.match((await unavailable.json()).error, /跟随主干/);
+  assert.equal((await f.configFile()).personaId, 'a');
+  assert.equal(f.socket(), existingSocket);
+  assert.equal(f.connects(), 1);
   assert.ok((await f.configFile()).mediaHosts.includes('multimedia.nt.qq.com.cn'));
   assert.deepEqual(await f.app.memory.listSessionMeta(), {});
   f.send(); await sent(f, '1');

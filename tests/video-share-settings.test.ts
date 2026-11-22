@@ -27,13 +27,14 @@ test('video share selector exposes the two choices and explains the playback lim
   assert.match(text(label), /部分视频可能无法播放.*切换为图文卡/);
 });
 
-test('settings load, save and reload each video share choice without losing other settings', async () => {
-  type Control = { value: string; type: string; checked: boolean; onsubmit?: (event: { preventDefault(): void }) => Promise<void>; [key: string]: unknown };
+test('settings preserve existing choices and round-trip video share and persona selection', async () => {
+  type Choice = { text: string; value: string };
+  type Control = { options: Choice[]; value: string; type: string; checked: boolean; onsubmit?: (event: { preventDefault(): void }) => Promise<void>; [key: string]: unknown };
   const control = (type = ''): Control => ({ value: '', type, checked: false, closest: () => ({ style: {} }),
-    replaceChildren() {}, add() {}, removeAttribute() {} });
+    options: [], replaceChildren(...choices: Choice[]) { this.options = choices; }, add(choice: Choice) { this.options.push(choice); }, removeAttribute() {} });
   const controls = new Map(html.filter(n => attr(n, 'id')).map(n => [attr(n, 'id')!, control(attr(n, 'type'))]));
   const byId = (id: string) => { const node = controls.get(id); assert.ok(node, id); return node; };
-  let config = publicConfig(parseConfig({ videoShareFormat: 'miniapp', mergeIncoming: false, galleryEnabled: false }));
+  let config = publicConfig(parseConfig({ videoShareFormat: 'miniapp', personaId: 'retired', mergeIncoming: false, galleryEnabled: false }));
   const saved: Record<string, unknown>[] = [];
   runInNewContext(script, {
     document: { getElementById: byId, createElement: () => control() },
@@ -48,16 +49,24 @@ test('settings load, save and reload each video share choice without losing othe
         saved.push(payload.config);
         config = publicConfig(parseConfig(payload.config));
       }
-      return { ok: true, json: async () => ({ config, revision: 'test-revision', personas: [], models: [], status: { state: 'disabled' } }) };
+      return { ok: true, json: async () => ({ config, revision: 'test-revision', personas: [{ id: 'a', name: 'Persona A' }], models: [], status: { state: 'disabled' } }) };
     },
   });
   await setImmediate();
   assert.equal(byId('videoShareFormat').value, 'miniapp');
-  for (const choice of ['card', 'miniapp']) {
+  const persona = byId('personaId');
+  assert.equal(persona.value, 'retired');
+  assert.deepEqual(persona.options.map(o => [o.text, o.value]), [
+    ['跟随主干', ''], ['Persona A', 'a'], ['已指定但不可用 · retired', 'retired'],
+  ]);
+  for (const [choice, personaId] of [['card', 'a'], ['miniapp', '']]) {
+    persona.value = personaId;
     byId('videoShareFormat').value = choice;
     await byId('form').onsubmit!({ preventDefault() {} });
     assert.equal(saved.at(-1)?.videoShareFormat, choice);
     assert.equal(config.videoShareFormat, choice);
+    assert.equal(saved.at(-1)?.personaId, personaId);
+    assert.equal(persona.value, personaId);
     assert.equal(byId('videoShareFormat').value, choice);
     assert.equal(saved.at(-1)?.mergeIncoming, false);
     assert.equal(saved.at(-1)?.galleryEnabled, false);

@@ -125,7 +125,10 @@ export class OutboundMiniApp {
   private submit: Submit;
   private card?: CardDelivery;
   private cache = new Map<string, { ledger: Ledger; saved: boolean }>();
-  constructor(ctx: Context, config: Config, prepareArk: PrepareArk, submit: Submit, card?: CardDelivery) {
+  private readSelectedPersona: () => string | Promise<string>;
+  constructor(ctx: Context, config: Config, prepareArk: PrepareArk, submit: Submit, card?: CardDelivery,
+    readSelectedPersona: () => string | Promise<string> = () => config.personaId) {
+    this.readSelectedPersona = readSelectedPersona;
     this.ctx = ctx; this.config = config; this.prepareArk = prepareArk; this.submit = submit; this.card = card;
   }
   private remember(ledger: Ledger, saved: boolean) {
@@ -160,21 +163,27 @@ export class OutboundMiniApp {
     catch { return fail('storage'); }
     this.remember(ledger, true);
   }
-  private async session(input: MiniAppKey & { personaId?: string }, signal: AbortSignal) {
+  private async requireSession(sessionId: string, signal: AbortSignal) {
     signal.throwIfAborted();
     try {
       // context() can describe a syntactically valid but absent ID. Existence
       // must come from the public list, not from a successful context lookup.
       const sessions = await this.ctx.sessions.list(); signal.throwIfAborted();
-      if (!sessions.some(session => session.id === input.sessionId)) fail('session');
-      await this.ctx.sessions.context(input.sessionId, input.personaId ?? this.config.personaId);
+      if (!sessions.some(session => session.id === sessionId)) fail('session');
     } catch { return fail('session'); }
     signal.throwIfAborted();
+  }
+  private async sessionPersona(sessionId: string, personaId?: string) {
+    try {
+      const selected = personaId ?? (this.config.personaId || await this.readSelectedPersona());
+      await this.ctx.sessions.context(sessionId, selected);
+      return selected;
+    } catch { return fail('session'); }
   }
   async status(input: MiniAppKey, signal: AbortSignal, includeFormat = false): Promise<VideoShareReceipt> {
     try {
       keys(input, ['userId', 'actionId', 'sessionId']);
-      const key = shareKey(input, this.config); await this.session(input, signal);
+      const key = shareKey(input, this.config); await this.requireSession(input.sessionId, signal);
       const found = await this.read(key); signal.throwIfAborted();
       if (found?.ledger.format === 'card' && !includeFormat) fail('conflict');
       return found ? receipt(found.ledger, true, found.saved, includeFormat)
@@ -191,12 +200,14 @@ export class OutboundMiniApp {
     try {
       signal.throwIfAborted();
       const { key, fingerprint } = validate(input, this.config, options, format);
-      await this.session(input, signal);
+      await this.requireSession(input.sessionId, signal);
       const previous = await this.read(key); signal.throwIfAborted();
       if (previous) {
         if (previous.ledger.fingerprint !== fingerprint || (previous.ledger.format ?? 'miniapp') !== format) fail('conflict');
         return receipt(previous.ledger, true, previous.saved, includeFormat);
       }
+      const personaId = await this.sessionPersona(input.sessionId, input.personaId);
+      signal.throwIfAborted();
       // Reserve the operation before any protocol call. Even a signing failure is
       // final for this action ID; callers must never use receipt lookup as retry.
       ledger = { version: 1, key, fingerprint, state: 'not_sent', ...(format === 'card' ? { format } : {}) };
@@ -220,7 +231,8 @@ export class OutboundMiniApp {
       }
       const platformId = await send(async () => {
         await checkReady(); signal.throwIfAborted();
-        await this.session(input, signal);
+        await this.requireSession(input.sessionId, signal);
+        await this.sessionPersona(input.sessionId, personaId); signal.throwIfAborted();
         ledger!.state = 'pending'; await this.save(ledger!); signal.throwIfAborted();
         await checkReady(); signal.throwIfAborted();
         // Preparation, validation and queueing leave room for supplements.

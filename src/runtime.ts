@@ -36,7 +36,7 @@ export class QQRuntime {
   private space: SpaceTransport;
   readonly spaceWeb: SpaceWebTransport;
   private media: MediaReader;
-  private channel: ChannelHandle;
+  private channel: ChannelHandle & { currentPersona?(): string };
   private tail: Promise<void> = Promise.resolve();
   private admissions = new Map<string, Promise<void>>();
   private pending = new Set<Promise<void>>();
@@ -111,6 +111,11 @@ export class QQRuntime {
     });
     this.space = new SpaceTransport(this.bot, this.signal, () => ({ accountId: this.config.accountId, online: this.state.state === 'online' }));
     this.spaceWeb = new SpaceWebTransport(this.bot, this.signal, () => ({ accountId: this.config.accountId, online: this.state.state === 'online' }));
+    const readSelectedPersona = () => {
+      const id = this.channel.currentPersona?.();
+      if (!id) throw new QQError('persona', '无法读取 QQ 渠道当前使用的人格。');
+      return id;
+    };
     this.outboundMedia = new OutboundMedia(ctx, config, async (userId, message, interval, signal, markPending) => {
       await delay(Math.max(interval, this.config.minReplyIntervalMs - (Date.now() - this.lastSent)), undefined, { signal });
       signal.throwIfAborted();
@@ -122,7 +127,7 @@ export class QQRuntime {
       const messageId = id(result.message_id);
       if (messageId === '0') throw new QQError('uncertain', '协议端未提供有效消息 ID，结果不确定。');
       this.lastSent = Date.now(); return messageId;
-    });
+    }, readSelectedPersona);
     const submitShare = (userId: string, message: ShareMessage, signal: AbortSignal,
       markPending: () => Promise<void>, markDispatched: () => void) => {
         // Signing must not occupy the ordinary delivery queue. Only a ready
@@ -146,9 +151,10 @@ export class QQRuntime {
     this.outboundMiniApp = new OutboundMiniApp(ctx, config,
       (params, signal) => this.bot.request('get_mini_app_ark', params, signal),
       (userId, ark, signal, pending, dispatched) => submitShare(userId, [{ type: 'json', data: { data: ark } }], signal, pending, dispatched),
-      { prepare: (input, signal) => prepareVideoCard(input, config, signal), submit: submitShare });
+      { prepare: (input, signal) => prepareVideoCard(input, config, signal), submit: submitShare }, readSelectedPersona);
     this.media = new MediaReader(ctx, config, this.bot, this.signal);
-    this.channel = ctx.channels.register({ id: 'qq', name: 'QQ 私聊', account: config.accountId, persona: config.personaId,
+    this.channel = ctx.channels.register({ id: 'qq', name: 'QQ 私聊', account: config.accountId,
+      ...(config.personaId ? { persona: config.personaId } : { personaMode: 'active' as const }),
       permission: config.permission, send: (message, { signal }) => {
         const task = this.sending.then(() => {
           if (message.replyTo === undefined && message.text.startsWith('[QQ 临时私聊；正文不留存；')) {
