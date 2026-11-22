@@ -18,7 +18,7 @@ async function fixture() {
   const root = await temporaryDirectory('whale-qq-release-');
   for (const dir of ['attach', 'managed', 'third-party', 'sub'])
     await cp(join(source, dir), join(root, dir), { recursive: true });
-  for (const name of ['plugin.yaml', 'README.md', 'MINIAPP-SHARING.md', 'VIDEO-SHARING.md', 'LICENSE',
+  for (const name of ['plugin.yaml', 'README.md', 'MINIAPP-SHARING.md', 'VIDEO-SHARING.md', 'TEXT-DELIVERY.md', 'LICENSE',
     'LICENSE-ADDITIONAL', 'NOTICE.md', 'THIRD_PARTY_NOTICES.md', 'engine.lock.json', 'desktop-engine.lock.json', 'attach-engine.lock.json'])
     await cp(join(source, name), join(root, name));
   await mkdir(join(root, 'scripts')); await cp(join(source, 'scripts/gallery-migration.mjs'), join(root, 'scripts/gallery-migration.mjs'));
