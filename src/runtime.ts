@@ -8,7 +8,7 @@ import { object, account, id, safeError, QQError, type Config } from './config.t
 import { TemporaryDrafts, type DraftKey } from './temporary-drafts.ts';
 import { OneBot, type LinkState } from './onebot.ts';
 import { MediaReader } from './media.ts';
-import { privateEvent, digest, splitText, type PrivateEvent } from './messages.ts';
+import { privateEvent, digest, splitText, EVENT_LIMIT, MAX_INLINE_EVENT_BYTES, type PrivateEvent } from './messages.ts';
 import { replyPlan } from './segmentation.ts';
 import { InboundMedia } from './inbound-media.ts';
 import { GroupSubscription } from './group-subscription.ts';
@@ -62,6 +62,7 @@ export class QQRuntime {
   private temporaryDrafts = new TemporaryDrafts();
   private transientSend?: { sessionId: string; peer: string; descriptor: string; text: string; allowDraft: boolean };
   private inflight = new Set<string>();
+  private queuedInlineWireBytes = 0;
   private lastSent = 0;
   private deliveryResults = new Map<string, TextDeliveryReceipt>();
   private continuations: TextContinuations;
@@ -87,7 +88,7 @@ export class QQRuntime {
         if (await ctx.sessions.current() !== entry.sessionId || (await this.channel.context(entry.peer)).id !== entry.sessionId) return 'session_changed';
       } catch { return 'host_blocked'; }
     });
-    this.bot = new OneBot(config, this.signal, event => this.accept(event), state => {
+    this.bot = new OneBot(config, this.signal, (event, wireBytes) => this.accept(event, wireBytes), state => {
       const changed = this.state.state !== state.state; this.state = state;
       if (changed && !this.signal.aborted) {
         try { ctx.emit('plugin:qq:connection-changed', { accountId: config.accountId, state: state.state }); } catch { /* notifications are advisory */ }
@@ -248,20 +249,30 @@ export class QQRuntime {
       try { this.ctx.logger.warn('QQ 私聊处理提示', { status, detail }); } catch { /* old context */ }
     }
   }
-  private accept(raw: Record<string, unknown>) {
+  private accept(raw: Record<string, unknown>, wireBytes: number) {
     if (this.signal.aborted || this.stopped) return;
     if (raw.message_type === 'group' || raw.post_type === 'notice') {
       this.groupSubscription.offer(raw, this.config.accountId, this.signal);
       return;
     }
+    const largeWireBytes = wireBytes > EVENT_LIMIT ? wireBytes : 0;
     let event: PrivateEvent | null;
-    try { event = privateEvent(raw, this.config); }
-    catch (error) { this.notice('invalid_event', undefined, safeError(error)); return; }
+    try {
+      // The transport filters oversized events by account and friend before this callback.
+      if (largeWireBytes && this.queuedInlineWireBytes + largeWireBytes > 4 * MAX_INLINE_EVENT_BYTES)
+        throw new QQError('busy', '待处理的内联图片过多，请稍后重发。');
+      event = privateEvent(raw, this.config, wireBytes);
+    } catch (error) {
+      let messageId: string | undefined;
+      try { messageId = id(raw.message_id); } catch { /* Invalid or absent identifier. */ }
+      this.notice('invalid_event', messageId, safeError(error)); return;
+    }
     if (!event) return;
     const key = `${event.peer}/${event.messageId}`;
     if (this.inflight.has(key)) return;
     if (this.inflight.size >= 64) { this.notice('busy', event.messageId, '待处理私聊过多，本条未接收。'); return; }
     this.inflight.add(key);
+    this.queuedInlineWireBytes += largeWireBytes;
     const merging = this.config.mergeIncoming && typeof this.channel.openTurn === 'function';
     // Admission must never wait for the model result. Serialize preparation per
     // peer, including the opening RPC, so arrivals cannot create competing turns.
@@ -271,7 +282,7 @@ export class QQRuntime {
     });
     const task = admission.then(value => value.completion).catch(error => {
       if (!this.signal.aborted) this.notice('failed', event!.messageId, safeError(error));
-    }).finally(() => { this.inflight.delete(key); });
+    }).finally(() => { this.inflight.delete(key); this.queuedInlineWireBytes -= largeWireBytes; });
     if (merging) {
       const ready = admission.then(() => {}, () => {});
       this.admissions.set(event.peer, ready);

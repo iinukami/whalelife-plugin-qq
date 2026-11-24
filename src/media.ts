@@ -7,7 +7,7 @@ import { fetch as httpFetch, FormData, ProxyAgent, type Dispatcher } from 'undic
 import type { Context, ModelConnection } from 'whalelife';
 import type { OneBot } from './onebot.ts';
 import { object, QQError, type Config } from './config.ts';
-import { faceText, segments, type PrivateEvent, type Segment } from './messages.ts';
+import { faceText, segments, imageSource, inlineSize, type PrivateEvent, type Segment } from './messages.ts';
 import { sharedVideoText } from './inbound-share.ts';
 
 export class MediaReader {
@@ -41,7 +41,7 @@ export class MediaReader {
   private async download(raw: unknown): Promise<Buffer> {
     if (typeof raw !== 'string') throw new QQError('media_url', '协议端未提供可读取的媒体地址。');
     if (raw.startsWith('base64://')) {
-      if (raw.length > this.config.maxMediaBytes * 1.34 + 20) throw new QQError('size', '媒体超过大小限制。');
+      inlineSize(raw, this.config.maxMediaBytes);
       return Buffer.from(raw.slice(9), 'base64');
     }
     let url: URL;
@@ -81,7 +81,7 @@ export class MediaReader {
     }
     if (Object.hasOwn(parameters, 'max_completion_tokens')) delete parameters.max_tokens;
     else if (!Object.hasOwn(parameters, 'max_tokens')) parameters.max_tokens = 2048;
-    let url = data.url;
+    let url = imageSource(data);
     if (!url) {
       const info = await this.bot.request('get_image', { file: data.file ?? data.file_id }, this.signal);
       url = info.url ?? info.file;

@@ -1,6 +1,6 @@
 id: qq
 name: QQ
-version: 0.25.0
+version: 0.25.1
 description: 通过 OneBot v11 接入 QQ 私聊，支持图片、表情和语音理解，复用人格与会话记忆。
 apiVersion: "1.0.0"
 depends: [web, channels, models, sessions, tools]

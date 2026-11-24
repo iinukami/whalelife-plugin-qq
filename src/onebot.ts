@@ -6,6 +6,11 @@ import WebSocket from 'ws';
 import { randomUUID } from 'node:crypto';
 import { object, account, QQError, type Config } from './config.ts';
 
+import { EVENT_LIMIT, privateSender } from './messages.ts';
+
+const ACTION_FRAME_LIMIT = 36 * 1024 * 1024;
+// One 25 MiB image can appear twice as Base64 in message and raw_message.
+const MAX_FRAME_BYTES = 2 * ACTION_FRAME_LIMIT;
 type Pending = { resolve(value: unknown): void; reject(error: Error): void; dispose(): void; plainText: boolean };
 const desktopUnavailable = '桌面 QQ 接入不可用（账号离线或身份校验未通过），正在等待同账号恢复并重新核验。';
 function platformError(value: Record<string, unknown>, guardedText = false) {
@@ -32,9 +37,9 @@ export class OneBot {
   private checkingDesktop = false;
   private signal: AbortSignal;
   private config: Config;
-  private onEvent: (event: Record<string, unknown>) => void;
+  private onEvent: (event: Record<string, unknown>, wireBytes: number) => void;
   private onState: (state: LinkState) => void;
-  constructor(config: Config, signal: AbortSignal, onEvent: (event: Record<string, unknown>) => void, onState: (state: LinkState) => void) {
+  constructor(config: Config, signal: AbortSignal, onEvent: (event: Record<string, unknown>, wireBytes: number) => void, onState: (state: LinkState) => void) {
     this.config = config; this.signal = signal; this.onEvent = onEvent; this.onState = onState;
     signal.addEventListener('abort', this.stop, { once: true });
   }
@@ -44,19 +49,22 @@ export class OneBot {
     this.onState({ state: 'connecting' });
     const ws = new WebSocket(this.config.wsUrl, {
       headers: this.config.accessToken ? { Authorization: `Bearer ${this.config.accessToken}` } : {},
-      handshakeTimeout: this.config.requestTimeoutMs, maxPayload: 36 * 1024 * 1024,
+      handshakeTimeout: this.config.requestTimeoutMs, maxPayload: MAX_FRAME_BYTES,
       followRedirects: false, perMessageDeflate: false,
     });
     this.socket = ws;
     ws.on('error', () => { /* close drives bounded reconnect; never log URLs or tokens */ });
     ws.on('message', bytes => {
       if (this.socket !== ws || this.stopped) return;
+      const message = bytes.toString();
+      const wireBytes = Buffer.isBuffer(bytes) ? bytes.length : Buffer.byteLength(message);
       let value: Record<string, unknown>;
-      try { value = object(JSON.parse(bytes.toString())); } catch { return; }
+      try { value = object(JSON.parse(message)); } catch { return; }
       if (typeof value.echo === 'string' && this.pending.has(value.echo)) {
         const call = this.pending.get(value.echo)!;
         this.pending.delete(value.echo); call.dispose();
-        if (value.status === 'ok' && value.retcode === 0) call.resolve(value.data);
+        if (wireBytes > ACTION_FRAME_LIMIT) call.reject(new QQError('size', '协议端回执超过大小限制。'));
+        else if (value.status === 'ok' && value.retcode === 0) call.resolve(value.data);
         else {
           if (this.config.connectionMode === 'attach' && [value.message, value.wording].includes('selected_account_offline')) {
             this.online = false; this.onState({ state: 'disconnected', error: desktopUnavailable });
@@ -65,8 +73,8 @@ export class OneBot {
         }
       } else if (this.online && (value.post_type === 'message' ||
         (value.post_type === 'notice' && value.notice_type === 'notify' && value.sub_type === 'poke' && value.group_id)) &&
-        Buffer.byteLength(bytes.toString()) <= 256 * 1024) {
-        try { this.onEvent(value); } catch { /* callback boundary */ }
+        (wireBytes <= EVENT_LIMIT || privateSender(value, this.config) !== null)) {
+        try { this.onEvent(value, wireBytes); } catch { /* callback boundary */ }
       }
     });
     ws.once('open', () => { void this.authenticate(ws).catch(() => { if (this.socket === ws) ws.terminate(); }); });
