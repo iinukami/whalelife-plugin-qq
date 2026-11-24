@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import { readFile, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import sharp from 'sharp';
+import { activePersonaMinimum, baselineBoot } from './host-baseline.ts';
 import { MockAgent, getGlobalDispatcher, setGlobalDispatcher } from 'undici';
 import type { Context } from 'whalelife';
 import type { OneBot } from '../src/onebot.ts';
@@ -158,7 +159,8 @@ async function failedInboxes(f: Fixture) {
     .filter(value => JSON.parse(value).state === 'failed');
 }
 async function host(t: TestContext, parameters: Record<string, unknown>) {
-  const f = await fixture(t, { temporaryDirectory, includeQzone: false, config: { mergeIncoming: false, galleryEnabled: false },
+  const f = await fixture(t, { hostBoot: await baselineBoot(activePersonaMinimum), temporaryDirectory, includeQzone: false,
+    config: { mergeIncoming: false, galleryEnabled: false },
     prepareHost: async root => {
       const path = join(root, 'config/config.json'), config = JSON.parse(await readFile(path, 'utf8'));
       config.models.find((entry: any) => entry.id === 'vision').parameters = parameters;

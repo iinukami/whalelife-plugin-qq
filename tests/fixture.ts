@@ -3,12 +3,16 @@ import { once } from 'node:events';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { mkdir, writeFile, cp, readFile, access } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { TestContext } from 'node:test';
 import { WebSocketServer, WebSocket } from 'ws';
 import { boot } from '../../whalelife/core/index.ts';
 import { temporaryDirectory } from '../../whalelife/tests/temporary-directory.ts';
 import { defaults, type Config } from '../src/config.ts';
+
+const hostPath = process.env.QQ_IMAGE_HOST_PATH;
+const currentBoot: typeof boot = hostPath ? (await import(pathToFileURL(resolve(hostPath, 'core/index.ts')).href)).boot : boot;
+if (typeof currentBoot !== 'function') throw Error('Selected QQ test host has no boot function');
 
 export async function until(check: () => unknown | Promise<unknown>, timeout = 7000) {
   const end = Date.now() + timeout;
@@ -82,7 +86,7 @@ export async function fixture(t: TestContext, options: { config?: Partial<Config
     channels: { web: { persona: 'a', permission: 'off' } }, memory: { root: 'memory', budget_tokens: 6000 },
   }));
   await options.prepareHost?.(root);
-  app = await (options.hostBoot ?? boot)(root);
+  app = await (options.hostBoot ?? currentBoot)(root);
   app.llm.chat = async (input: any) => { generations.push(input); return generate ? generate(input) : { text: '测试回复🙂', toolCalls: [], usage: { prompt_tokens: 10, completion_tokens: 5 } }; };
   const url = `http://127.0.0.1:${app.web.server.address().port}`;
   const login = await fetch(url + '/api/login', { method: 'POST', body: '{}' });
@@ -104,6 +108,21 @@ export async function fixture(t: TestContext, options: { config?: Partial<Config
     setAction(fn: typeof action) { action = fn; }, setModelHandler(fn: typeof modelHandler) { modelHandler = fn; }, setGenerate(fn: typeof generate) { generate = fn; },
     async configFile() { return JSON.parse(await readFile(join(root, 'plugins/qq/data/config.json'), 'utf8')); },
   };
+}
+
+export function supportsImageInput(f: Awaited<ReturnType<typeof fixture>>): boolean {
+  const channel = f.app.channels.register({ id: 'image-capability-test', account: 'synthetic', persona: 'a', send: async () => {} });
+  try { return channel.supportsImageInput === true; } finally { channel.dispose(); }
+}
+
+export function userText(generation: any): string {
+  const content = generation.messages.filter((m: any) => m.role === 'user').at(-1).content;
+  return typeof content === 'string' ? content : content.filter((part: any) => part.type === 'text').map((part: any) => part.text).join('\n');
+}
+
+export function userImageCount(generation: any): number {
+  return generation.messages.filter((m: any) => m.role === 'user' && Array.isArray(m.content))
+    .reduce((total: number, m: any) => total + m.content.filter((part: any) => part.type === 'image_url').length, 0);
 }
 
 export async function selectOnWeb(f: Awaited<ReturnType<typeof fixture>>, id: 'a' | 'b') {

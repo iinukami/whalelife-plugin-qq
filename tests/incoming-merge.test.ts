@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import sharp from 'sharp';
 import { createHash } from 'node:crypto';
-import { fixture, until } from './fixture.ts';
+import { fixture, supportsImageInput, until, userImageCount } from './fixture.ts';
 import { segmentationDefaults } from '../src/config.ts';
 
 type Fixture = Awaited<ReturnType<typeof fixture>>;
@@ -133,10 +133,13 @@ test('formal text tool closes input while early acknowledgement does not', async
 test('image, voice and emoji normalization can join a pending turn without losing media input', async t => {
   const held = gate(); t.after(held.release);
   const f = await fixture(t); await f.online(); let rounds = 0;
+  const native = supportsImageInput(f);
   f.setGenerate(async input => {
     if (++rounds === 1) { await held.wait(input.signal); return reply('OLD'); }
     const context = JSON.stringify(input.messages);
-    assert.ok(context.includes('开心的小猫')); assert.ok(context.includes('明天下午三点见')); assert.ok(context.includes('🙂'));
+    if (native) assert.equal(userImageCount(input), 1);
+    else assert.ok(context.includes('开心的小猫'));
+    assert.ok(context.includes('明天下午三点见')); assert.ok(context.includes('🙂'));
     return reply('收到图和语音。');
   });
   message(f, 1, 'WAIT'); await until(() => rounds === 1);

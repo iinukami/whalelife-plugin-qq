@@ -1,15 +1,19 @@
-import { test } from 'node:test';
+import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { cp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { baselineBoot, positiveBaselines } from './host-baseline.ts';
 import sharp from 'sharp';
-import { fixture, until } from './fixture.ts';
+import { fixture, supportsImageInput, until, userImageCount, userText } from './fixture.ts';
 import { InboundMedia } from '../src/inbound-media.ts';
 
 type Fixture = Awaited<ReturnType<typeof fixture>>;
-const sent = (f: Fixture, id = '1') => until(async () => (await f.status()).recent.some((n: any) => n.messageId === id && n.status === 'sent'));
-const content = (f: Fixture, index = 0): string => f.generations[index].messages.filter((m: any) => m.role === 'user').at(-1).content;
+const observed = (f: Fixture, id = '1', status = 'sent') => until(async () => {
+  const notice = (await f.status()).recent.find((row: any) => row.messageId === id);
+  if (notice && ['failed', 'delivery_failed'].includes(notice.status)) throw Error(notice.detail);
+  return notice?.status === status;
+}, 15000);
+const content = (f: Fixture, index = 0) => userText(f.generations[index]);
 const refs = (text: string) => [...text.matchAll(/mediaRef=([a-zA-Z0-9_-]+)/g)].map(m => m[1]);
 const imageEvent = (bytes: Buffer) => ({ message: [{ type: 'image', data: { url: 'base64://' + bytes.toString('base64') } }] });
 const png = () => sharp({ create: { width: 8, height: 8, channels: 3, background: '#ffaa33' } }).png().toBuffer();
@@ -61,12 +65,14 @@ for (const baseline of positiveBaselines) test(`QQ → real gallery on ${baselin
   await until(async () => (await f.status()).mediaBridge.active);
   assert.equal((await f.status()).mediaBridge.mode, 'builtin');
   assert.equal(f.app.runtime.records.has('qq/gallery'), false);
+  const native = supportsImageInput(f);
   const a = await png(), b = await gif(); assert.equal((await sharp(b).metadata()).pages, 2);
   let collected: any, turn = 0;
   f.setGenerate(async input => {
     if (turn++ === 0) {
-      const found = refs(input.messages.filter((m: any) => m.role === 'user').at(-1).content);
+      const found = refs(userText(input));
       assert.equal(found.length, 2); assert.notEqual(found[0], found[1]);
+      assert.equal(userImageCount(input), native ? 3 : 0);
       return { text: '', toolCalls: [{ id: 'collect-gif', name: 'gallery_collect', arguments: JSON.stringify({ mediaRef: found[1] }) }] };
     }
     collected = JSON.parse(input.messages.at(-1).content).result;
@@ -79,7 +85,7 @@ for (const baseline of positiveBaselines) test(`QQ → real gallery on ${baselin
     return { text: '完成。', toolCalls: [] };
   });
   f.send({ message: [...imageEvent(a).message, { type: 'mface', data: { url: 'base64://' + b.toString('base64') } }] });
-  await sent(f);
+  await observed(f);
   const found = refs(content(f)), inputRow = (Object.entries<any>(await f.app.memory.listSessionMeta())).find(([, m]) => !m.deleted)!;
   const sessionId = inputRow[0];
   const gallery = f.app.runtime.services.get('gallery')!.value;
@@ -100,58 +106,81 @@ for (const baseline of positiveBaselines) test(`QQ → real gallery on ${baselin
   assert.ok(!content(f).includes(a.toString('base64')) && !content(f).includes('base64://'));
   const before = { generations: f.generations.length, modelCalls: f.modelCalls.length, sends: f.calls.filter(c => c.action === 'send_private_msg').length };
   await f.app.runtime.action('qq', 'reload'); await f.online();
-  f.send({ message: [...imageEvent(a).message, { type: 'mface', data: { url: 'base64://' + b.toString('base64') } }] }); await sent(f);
+  f.send({ message: [...imageEvent(a).message, { type: 'mface', data: { url: 'base64://' + b.toString('base64') } }] });
+  await observed(f, '1', native ? 'duplicate' : 'sent');
   assert.equal(f.generations.length, before.generations); assert.equal(f.calls.filter(c => c.action === 'send_private_msg').length, before.sends);
   assert.equal(f.modelCalls.length, before.modelCalls);
   assert.equal(refs(content(f)).length, 2);
   await f.app.runtime.action('gallery', 'stop');
   assert.equal(f.app.runtime.records.get('qq')?.status, 'active');
   await until(async () => !(await f.status()).mediaBridge.active);
-  f.setGenerate(undefined); f.send({ message_id: 2, ...imageEvent(a) }); await sent(f, '2');
+  f.setGenerate(undefined); f.send({ message_id: 2, ...imageEvent(a) }); await observed(f, '2');
   assert.deepEqual(refs(content(f, before.generations)), []);
   await f.app.runtime.action('gallery', 'start');
   await until(async () => (await f.status()).mediaBridge.active);
   assert.equal(await f.app.runtime.services.get('witness')!.value.ping(), 'alive');
 });
 
-test('QQ without gallery retains image/voice/text behavior and does not expose raw bytes', async t => {
+test('QQ images without gallery reach the model on the available path and stay out of persistent history', async t => {
   const f = await fixture(t); await f.online();
   assert.equal((await f.status()).mediaBridge.active, false);
   assert.equal(f.app.runtime.records.get('qq')?.status, 'active');
   assert.equal(f.app.runtime.records.has('qq/gallery'), false);
-  const bytes = await png(); f.send(imageEvent(bytes)); await sent(f);
-  assert.match(content(f), /小猫/); assert.deepEqual(refs(content(f)), []);
-  assert.ok(!content(f).includes(bytes.toString('base64')));
+  const bytes = await png(); f.send(imageEvent(bytes)); await observed(f);
+  if (supportsImageInput(f)) {
+    assert.equal(userImageCount(f.generations[0]), 1);
+    assert.equal(f.modelCalls.length, 0);
+  } else {
+    assert.match(content(f), /小猫/);
+    assert.equal(f.modelCalls.length, 1);
+  }
+  assert.deepEqual(refs(content(f)), []);
+  const history = JSON.stringify(await f.app.memory.readSession(await f.app.sessions.current()));
+  assert.ok(!history.includes('base64,') && !history.includes(bytes.toString('base64')));
 });
 
-test('Web switch during recognition and direct/background binding cannot move the image reference to another session', async t => {
-  const f = await fixture(t, { prepareHost: fakeGallery }); await f.online();
-  const a = await f.app.sessions.current(), b = await f.app.sessions.create('B');
+async function sendAndHoldDownload(f: Fixture, t: TestContext) {
+  const bytes = await png();
   let release!: () => void, entered = false;
-  const gate = new Promise<void>(r => release = r); t.after(release);
-  f.setModelHandler(async (req, res) => { for await (const _ of req) {} entered = true; await gate; res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ choices: [{ message: { content: 'held-image' } }] })); });
-  f.send(imageEvent(await png())); await until(() => entered);
+  const gate = new Promise<void>(r => { release = r; }); t.after(release);
+  f.setModelHandler(async (req, res) => {
+    if (req.method === 'GET' && req.url === '/hold.png') {
+      entered = true; await gate;
+      res.writeHead(200, { 'Content-Type': 'image/png' }).end(bytes);
+    } else if (req.method === 'POST' && req.url === '/v1/chat/completions') {
+      for await (const _ of req) {}
+      res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ choices: [{ message: { content: 'held-image' } }] }));
+    } else { res.writeHead(404).end(); }
+  });
+  f.send({ message: [{ type: 'text', data: { text: 'SYNTHETIC_SWITCH_IMAGE' } }, { type: 'image', data: { url: f.modelUrl + '/hold.png' } }] });
+  await until(() => entered);
+  return release;
+}
+
+test('Web switch during image preparation and direct/background binding cannot move the image reference to another session', async t => {
+  const f = await fixture(t, { prepareHost: fakeGallery, config: { requestTimeoutMs: 5000 } }); await f.online();
+  const a = await f.app.sessions.current(), b = await f.app.sessions.create('B');
+  const release = await sendAndHoldDownload(f, t);
   await f.request('/api/session/current', { id: b });
   await assert.rejects(f.app.runtime.services.get('qq')!.value.sendText({ userId: '200002', messageId: 'during-image', text: 'must-not-send' }));
-  await new Promise(r => setTimeout(r, 1200)); release(); await sent(f);
+  await new Promise(r => setTimeout(r, 1200)); release(); await observed(f);
   const offered = (await f.app.runtime.services.get('gallery')!.value.state()).offers[0];
   assert.equal(offered.sessionId, a); assert.equal(offered.source, 'qq');
   assert.ok((await f.app.memory.readSession(a)).some((row: any) => row.role === 'user' && row.text.includes('mediaRef=test-ref-1')));
   assert.equal((await f.app.memory.readSession(b)).length, 0);
-  f.send({ message_id: 2 }); await sent(f, '2');
+  f.send({ message_id: 2 }); await observed(f, '2');
   assert.ok((await f.app.memory.readSession(b)).some((row: any) => row.role === 'user'));
 });
 
-test('without a media receiver, session selection still follows Web after recognition as before', async t => {
+test('without a media receiver, session selection follows Web after the image is prepared', async t => {
   const f = await fixture(t); await f.online();
   const a = await f.app.sessions.current(), b = await f.app.sessions.create('B');
-  let release!: () => void, entered = false;
-  const gate = new Promise<void>(r => release = r); t.after(release);
-  f.setModelHandler(async (req, res) => { for await (const _ of req) {} entered = true; await gate; res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ choices: [{ message: { content: 'old-selection-timing' } }] })); });
-  f.send(imageEvent(await png())); await until(() => entered);
-  await f.request('/api/session/current', { id: b }); release(); await sent(f);
+  const release = await sendAndHoldDownload(f, t);
+  await f.request('/api/session/current', { id: b }); release(); await observed(f);
   assert.equal((await f.app.memory.readSession(a)).length, 0);
-  assert.ok((await f.app.memory.readSession(b)).some((row: any) => row.role === 'user' && row.text.includes('old-selection-timing')));
+  assert.ok((await f.app.memory.readSession(b)).some((row: any) => row.role === 'user' && row.text.includes('SYNTHETIC_SWITCH_IMAGE')));
+  if (supportsImageInput(f)) assert.equal(userImageCount(f.generations[0]), 1);
+  else assert.match(content(f), /held-image/);
   assert.equal(refs(content(f)).length, 0);
 });
 
@@ -160,18 +189,18 @@ test('QQ gallery switch cancels an in-flight offer, failure never claims collect
   const gallery = f.app.runtime.services.get('gallery')!.value;
   await gallery.mode('wait'); f.send(imageEvent(await png()));
   await until(async () => (await gallery.state()).offers.length === 1);
-  assert.equal((await f.save({ galleryEnabled: false })).status, 200); await sent(f);
+  assert.equal((await f.save({ galleryEnabled: false })).status, 200); await observed(f);
   await until(async () => (await gallery.state()).cancelled === 1);
   assert.equal((await f.status()).mediaBridge.active, false);
   assert.match(content(f), /未取得可用/); assert.deepEqual(refs(content(f)), []);
-  f.send({ message_id: 2 }); await sent(f, '2');
+  f.send({ message_id: 2 }); await observed(f, '2');
   await gallery.mode('fail'); assert.equal((await f.save({ galleryEnabled: true })).status, 200);
   await until(async () => (await f.status()).mediaBridge.active);
-  f.send({ message_id: 3, ...imageEvent(await png()) }); await sent(f, '3');
+  f.send({ message_id: 3, ...imageEvent(await png()) }); await observed(f, '3');
   assert.match(content(f, 2), /未取得可用/); assert.ok(!content(f, 2).includes('secret-test-credential'));
   assert.equal(f.app.runtime.records.get('qq')?.status, 'active');
   assert.equal(f.app.runtime.records.has('qq/gallery'), false);
-  await gallery.mode('ok'); f.send({ message_id: 4, ...imageEvent(await png()) }); await sent(f, '4');
+  await gallery.mode('ok'); f.send({ message_id: 4, ...imageEvent(await png()) }); await observed(f, '4');
   assert.equal(refs(content(f, 3)).length, 1);
   f.send({ message_id: 3, ...imageEvent(await png()) }); await until(async () => (await f.status()).recent[0]?.messageId === '3');
   assert.equal(f.generations.length, 4); assert.equal((await gallery.state()).offers.length, 3);
@@ -188,7 +217,7 @@ test('parent stop cancels handoff and prevents model/send replay after reload', 
   await gallery.mode('ok'); await f.app.runtime.action('qq', 'start'); await f.online();
   f.send(event); await until(async () => (await f.status()).recent[0]?.status === 'uncertain');
   assert.equal((await gallery.state()).offers.length, 1); assert.equal(f.generations.length, 0);
-  f.send({ message_id: 2 }); await sent(f, '2');
+  f.send({ message_id: 2 }); await observed(f, '2');
 });
 
 test('receiver unregister cancels ignored work, rejects malformed references and releases old registrations', async () => {

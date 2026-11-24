@@ -142,11 +142,11 @@ export function parseConfig(input: unknown): Config {
     throw new QQError('config', '连接前请填写私聊白名单。桌面和外部模式需要机器人 QQ 号，外部模式还需要协议端地址。');
   return cfg;
 }
-export function validateSelections(ctx: Context, config: Config) {
+export function validateSelections(ctx: Context, config: Config, { checkVision = true } = {}) {
   if (config.enabled && (!('supportsActivePersona' in ctx.channels) || ctx.channels.supportsActivePersona !== true))
     throw new QQError('persona', '当前 WhaleLife 不支持渠道跟随主干人格，请升级后再启用 QQ。');
   for (const [key, types] of [['visionModelId', ['chat', 'custom']], ['sttModelId', ['stt']]] as const) {
-    if (!config[key]) continue;
+    if (!config[key] || (key === 'visionModelId' && !checkVision)) continue;
     const model = ctx.models.connection(config[key]);
     if (!(types as readonly string[]).includes(model.type) || model.protocol !== 'openai-compatible')
       throw new QQError('model', `${key}需要 OpenAI 兼容协议及对应模型用途。`);

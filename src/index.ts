@@ -64,7 +64,7 @@ export async function apply(ctx: Context) {
   const status = () => ({ ...(runtime?.status() ?? { state: engine?.status.state ?? (config.enabled ? 'unconfigured' : 'disabled'), error: engine?.status.error || error, queued: 0, recent: [] }),
     mediaBridge: { active: inboundMedia.active(), mode: builtinGallery ? 'builtin' : 'legacy', enabled: config.galleryEnabled }, ...(engine ? { engine: { ...engine.status } } : {}) });
   try {
-    const raw = await ctx.config.read(); config = parseConfig(raw); validateSelections(ctx, config);
+    const raw = await ctx.config.read(); config = parseConfig(raw); validateSelections(ctx, config, { checkVision: false });
     if (raw.schemaVersion === 0 || raw.schemaVersion === 1 || raw.schemaVersion === 2) {
       await ctx.config.save(`config-v${raw.schemaVersion}-backup.json`, raw); await ctx.config.save('config.json', config);
     } else if (Array.isArray(raw.mediaHosts) && raw.mediaHosts.length === 4 && config.mediaHosts.length === 5) {
@@ -234,7 +234,7 @@ export async function apply(ctx: Context) {
         if (incoming.wsUrl !== config.wsUrl && config.accessToken && !token && input.clearToken !== true)
           throw new QQError('token', '修改协议端地址时，请重新输入或明确清除令牌。');
         const next = parseConfig({ ...incoming, accessToken: input.clearToken === true ? '' : token || config.accessToken });
-        validateSelections(ctx, next);
+        validateSelections(ctx, next, { checkVision: next.visionModelId !== config.visionModelId });
         const galleryChanged = config.galleryEnabled !== next.galleryEnabled;
         if (galleryChanged && !builtinGallery) throw new QQError('config', '旧宿主请在插件管理中启停图库接入。');
         const galleryOnly = galleryChanged && JSON.stringify({ ...next, galleryEnabled: config.galleryEnabled }) === JSON.stringify(config);

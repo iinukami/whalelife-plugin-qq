@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import sharp from 'sharp';
-import { fixture, selectOnWeb, until } from './fixture.ts';
+import { fixture, supportsImageInput, userText, userImageCount, selectOnWeb, until } from './fixture.ts';
 
 test('synced installation loads with no private config, stays offline, and can stop/start independently', { timeout: 20000 }, async t => {
   const f = await fixture(t, { unconfigured: true, packagePath: process.env.QQ_INSTALLED_PACKAGE });
@@ -75,14 +75,20 @@ test('images, animated stickers, emoji, unknown system faces and platform voice 
   ] });
   await until(() => f.generations.length === 1);
   await until(async () => (await f.status()).recent.some((n: any) => n.status === 'sent'));
-  const content = f.generations[0].messages.filter((m: any) => m.role === 'user').at(-1).content;
-  for (const expected of ['看看🙂', '比心', '小猫', '明天下午三点见']) assert.ok(content.includes(expected));
-  assert.equal(f.modelCalls.length, 2); assert.equal(f.modelCalls[0].authorization, 'Bearer fake-model-secret');
-  assert.equal(JSON.parse(f.modelCalls[1].body).messages[0].content.filter((x: any) => x.type === 'image_url').length, 2);
+  const content = userText(f.generations[0]);
+  for (const expected of ['看看🙂', '比心', '明天下午三点见']) assert.ok(content.includes(expected));
+  if (supportsImageInput(f)) {
+    assert.equal(userImageCount(f.generations[0]), 3);
+    assert.equal(f.modelCalls.length, 0);
+  } else {
+    assert.match(content, /小猫/);
+    assert.equal(f.modelCalls.length, 2); assert.equal(f.modelCalls[0].authorization, 'Bearer fake-model-secret');
+    assert.equal(JSON.parse(f.modelCalls[1].body).messages[0].content.filter((x: any) => x.type === 'image_url').length, 2);
+  }
   assert.equal(f.calls.filter(c => c.action === 'fetch_ptt_text').length, 1);
 });
 
-test('STT model receives WAV using selected connection; missing vision model fails explicitly and leaves text usable', { timeout: 25000 }, async t => {
+test('STT uses the selected connection and images require an auxiliary model only on a text-only host', { timeout: 25000 }, async t => {
   const f = await fixture(t, { config: { speechMode: 'model', visionModelId: '' } }); await f.online();
   const wav = Buffer.alloc(44); wav.write('RIFF'); wav.write('WAVE', 8);
   f.setAction((data, socket) => {
@@ -93,10 +99,13 @@ test('STT model receives WAV using selected connection; missing vision model fai
   f.send({ message: [{ type: 'record', data: { file: 'voice' } }] });
   await until(() => f.generations.length === 1);
   assert.match(f.modelCalls[0].path, /audio\/transcriptions$/); assert.match(f.modelCalls[0].body, /voice.wav/);
-  f.send({ message_id: 2, message: [{ type: 'image', data: { file: 'image' } }] });
-  await until(async () => (await f.status()).recent.some((n: any) => n.status === 'failed'));
-  assert.equal(f.generations.length, 1);
-  f.send({ message_id: 3 }); await until(() => f.generations.length === 2);
+  const png = await sharp({ create: { width: 3, height: 2, channels: 3, background: 'green' } }).png().toBuffer();
+  f.send({ message_id: 2, message: [{ type: 'image', data: { url: 'base64://' + png.toString('base64') } }] });
+  const native = supportsImageInput(f);
+  await until(async () => (await f.status()).recent.some((n: any) => n.messageId === '2' && n.status === (native ? 'sent' : 'failed')));
+  if (native) assert.equal(userImageCount(f.generations[1]), 1);
+  assert.equal(f.generations.length, native ? 2 : 1);
+  f.send({ message_id: 3 }); await until(() => f.generations.length === (native ? 3 : 2));
   assert.equal(f.app.runtime.records.get('qq')?.status, 'active');
 });
 
@@ -142,8 +151,7 @@ test('stop during model generation cancels work, removes pages/services and prev
 test('stop during media HTTP aborts the request and uncertain preprocessing is not replayed on restart', { timeout: 25000 }, async t => {
   const f = await fixture(t); await f.online(); let entered = false, closed = false;
   f.setModelHandler((_req, res) => { entered = true; res.on('close', () => { closed = true; }); });
-  const png = await sharp({ create: { width: 2, height: 2, channels: 3, background: 'red' } }).png().toBuffer();
-  const message = [{ type: 'image', data: { url: 'base64://' + png.toString('base64') } }];
+  const message = [{ type: 'image', data: { url: f.modelUrl + '/hanging-image.png' } }];
   f.send({ message }); await until(() => entered);
   await f.app.runtime.action('qq', 'stop'); await until(() => closed);
   assert.equal(f.generations.length, 0);

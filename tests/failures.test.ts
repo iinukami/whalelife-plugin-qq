@@ -5,6 +5,7 @@ import { createConnection } from 'node:net';
 import type { Duplex } from 'node:stream';
 import { once } from 'node:events';
 import sharp from 'sharp';
+import { activePersonaMinimum, baselineBoot } from './host-baseline.ts';
 import { fixture, until } from './fixture.ts';
 
 test('account mismatch stops permanently and never receives or sends for the wrong account', { timeout: 15000 }, async t => {
@@ -60,7 +61,7 @@ test('connection switch cancels pending platform acknowledgment and stops reconn
   assert.equal(f.app.runtime.records.get('qq')?.status, 'active');
 });
 
-test('model proxy is used for actual image requests, and model timeout cancels hanging HTTP', { timeout: 25000 }, async t => {
+test('the auxiliary vision model on a text-only host uses its proxy and cancels hanging HTTP', { timeout: 25000 }, async t => {
   const proxy = createServer(); let tunnels = 0; const sockets = new Set<Duplex>();
   proxy.on('connect', (req, client, head) => {
     tunnels++; const target = new URL('http://' + req.url!);
@@ -74,7 +75,7 @@ test('model proxy is used for actual image requests, and model timeout cancels h
   });
   t.after(async () => { for (const s of sockets) s.destroy(); await new Promise<void>(r => proxy.close(() => r())); });
   proxy.listen(0, '127.0.0.1'); await once(proxy, 'listening');
-  const f = await fixture(t, { proxy: `http://127.0.0.1:${(proxy.address() as { port: number }).port}`, modelTimeout: 1 }); await f.online();
+  const f = await fixture(t, { hostBoot: await baselineBoot(activePersonaMinimum), proxy: `http://127.0.0.1:${(proxy.address() as { port: number }).port}`, modelTimeout: 1 }); await f.online();
   const png = await sharp({ create: { width: 2, height: 2, channels: 3, background: 'blue' } }).png().toBuffer();
   const message = [{ type: 'image', data: { url: 'base64://' + png.toString('base64') } }];
   f.send({ message }); await until(() => f.generations.length === 1);
